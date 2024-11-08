@@ -21,6 +21,9 @@
 # User-specific files
 .Ruserdata
 
+# R history
+.Rhistory
+
 # Example code in package build process
 *-Ex.R
 

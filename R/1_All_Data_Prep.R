@@ -13,6 +13,7 @@ packages <- c('akima','assertthat', 'chron','data.table','tidyr','tidyverse','pl
               'lattice','NADA','raster','rgdal','rgeos','sp', 'sf', 'stringr','terra','data.table','dplyr')
 lapply(packages, library, character.only=TRUE)
 
+x <-5+2 #test
 
 setwd(here::here("data"))
 mapUSm <- readOGR(dsn="CoVar/US48", layer="US_48states") # load projected map of the US (in m)

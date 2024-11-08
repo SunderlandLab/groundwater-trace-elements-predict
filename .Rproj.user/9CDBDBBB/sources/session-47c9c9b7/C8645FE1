@@ -1,0 +1,24 @@
+{
+    "id": "C8645FE1",
+    "path": "~/Documents/Projects/Groundwater predictive model/Code/GWPred/GWPred/R/7_geoSOM_Grid.R",
+    "project_path": "R/7_geoSOM_Grid.R",
+    "type": "r_source",
+    "hash": "2125335365",
+    "contents": "",
+    "dirty": false,
+    "created": 1731098452272.0,
+    "source_on_save": false,
+    "relative_order": 8,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1731083574,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1731083574,
+    "read_only": false,
+    "read_only_alternatives": []
+}

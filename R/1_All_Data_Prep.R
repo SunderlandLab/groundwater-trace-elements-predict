@@ -1,12 +1,9 @@
 ###########################################################################
 #File name: All_Data_Prep.R
 #Author: Jennifer Sun, Jonas LaPier, Cindy Hu
-#Date: March 2023
+#Date: Jan 2025
 #Purpose: All steps for WQP well data preparation 
 ########################################################################### 
-
-#Please note that rgdal will be retired during 2023,
-#plan transition to sf/stars/terra functions using GDAL and PROJ
 
 #### Attach Libraries and Set Working Directory ####
 packages <- c('akima','assertthat', 'chron','data.table','tidyr','tidyverse','plyr','geosphere','ggplot2', 
@@ -16,7 +13,6 @@ setwd(here::here("data"))
 mapUSm <- st_read("CoVar/US48/US_48states.shp") # load projected map of the US (in m)
 
 #### Define Model Version ####
-
 metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
 metals <- c("Arsenic", "Cadmium",  "Lithium", "Manganese", "Strontium")
 names(metals) <- metal.codes

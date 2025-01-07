@@ -1,396 +1,423 @@
 ##################################################################################
 #File name: Predictors_Extract.R
 #Author: Jennifer Sun, Jonas LaPier, Cindy Hu
-#Date: March 2023
+#Date: Jan 2025
 #Purpose: Attach explanatory variable data (i.e. predictors) to well locations
-# R v3.5.1 and v4.2.2
+# R v4.4.2
 ##################################################################################
 
-# NOTE: as of 3/14/23, geochem parameters (parallel processing) must be extracted in R v3.5.1; interpolation does not work efficiently under v4.2.2
-# buffering needs to be done in R v.4.2.2 (unclear whether terra works or is just very slow in an earlier version)
-# there may be an intermediate version that works for both 
-# dataframe needs to be temporarily saved after step 5; R restarted, version changed, dataframe read back in and the rest of the code run
-
 packages <- c('akima','beepr','chron','foreign','geosphere','ggplot2','gstat', 'lattice','NADA','plyr', 
-              'parallel','raster', 'readxl','rgdal','rgeos','sp','stringr','terra','tiff','VIM','dplyr')
+              'parallel','raster', 'readxl','sf','stringr','terra','tiff','VIM','dplyr')
 lapply(packages, library, character.only=TRUE)
 
-setwd('/Users/jennifer/Documents/Harvard/Drinking Water/Metals_Modeling.nosync/DWheavymetal')
-mapUSm <- readOGR(dsn="CoVar/US48", layer="US_48states") # load projected map of the US (in m)
-
+setwd(here::here("data"))
+mapUSm <- st_read("CoVar/US48/US_48states.shp") # load projected map of the US (in m)
 
 #### Define Model Version ####
-metal = "MapGrid" # MapGrid
-metal.code = "mapgrid" #mapgrid
-version.number = '6'
-well.sumtype = ''
-MCL = 60
-folder.name = paste0(metal.code,'_',version.number,'/')
+metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
+metals <- c("Arsenic", "Cadmium",  "Lithium", "Manganese", "Strontium")
+names(metals) <- metal.codes
 
-##  Step 1. Load in WQP well location data and well measurements ------------------------------------------------------------------------------- 
-M_stn = readRDS(paste0("R_Output/",folder.name, metal.code,"_Combined_WQP.rds")) # read in preprocessed data
-coordinates(M_stn) <- c("longitude","latitude")
-
-##  Step 2. Environmental predictors: extract values to wells--------------------------------------------------------------------------
-
-# 1) Precipitation (mm)
-ppt <- raster('CoVar/PRISM_ppt_30yr_normal_800mM2_annual_asc/PRISM_ppt_30yr_normal_800mM2_annual_asc.asc')
-M_stn <- spTransform(M_stn, crs(ppt)) # extract crs and set well projection
-M_stn$ppt <- raster::extract(ppt, M_stn, method='bilinear')
-print('ppt completed')
-
-# Set a project CRS for some of the files
-project.crs = crs(ppt)
-rm(ppt)
-
-# 2) Annual Mean Temp (F)
-tmean<- raster('CoVar/PRISM_tmean_30yr_normal_800mM2_annual_asc/PRISM_tmean_30yr_normal_800mM2_annual_asc.asc')
-M_stn <- spTransform(M_stn, crs(tmean)) # extract crs and set well projection 
-M_stn$tmean <- raster::extract(tmean, M_stn, method='bilinear') 
-rm(tmean)
-print('tmean completed')
-
-# 3) Groundwater flow parameters from Reitz et al. 2017 (800 m resolution)
-quickflow <- raster("CoVar/reitz_hydrology/QuickFlow_0013/RO_0013.tif")
-M_stn <- spTransform(M_stn, crs(quickflow))
-M_stn$quickflow <- raster::extract(quickflow, M_stn, method='bilinear') # bilinear uses 4 nearest cell centers, distance weighted
-rm(quickflow)
-
-effrech <- raster("CoVar/reitz_hydrology/EffRecharge_0013_v2/0013/RC_eff_0013.tif")
-M_stn$effrech <- raster::extract(effrech, M_stn, method='bilinear')
-rm(effrech)
-
-ET <- raster("CoVar/reitz_hydrology/ET_0013/ET_0013.tif")
-M_stn$ET <- raster::extract(ET, M_stn, method='bilinear')
-rm(ET)
-
-print('groundwater flow parameters completed')
-
-# 3b) Original recharge from Wolock et al. for comparison
-rech_raster<- raster('CoVar/rech48grd/rech48grd/w001001x.adf')
-rech_raster <- projectRaster(rech_raster, crs = project.crs) # the original CRS wasn't working
-M_stn <- spTransform(M_stn, crs(rech_raster))  # extract and set well projection
-M_stn$rech <- raster::extract(rech_raster, M_stn, method='bilinear')
-rm(rech_raster)
-print('rech completed')
-
-# 4) Soil Organic Content, (tons/Hectare)
-ncin <- raster('CoVar/HWSDa_OC_Dens_30SEC_US.asc')
-crs(ncin) <- '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0'  
-M_stn <- spTransform(M_stn, crs(ncin))  # extract and set well projection
-M_stn$soiloc <- raster::extract(ncin, M_stn, method='bilinear')
-rm(ncin)
-print('ncin completed') 
-
-# 5) Soil Geochemistry, C-horizon
-print("started geochem")
-geochem<-read.table('CoVar/soil_geochemistry/Appendix_4b_Chorizon_18Sept2013.txt',header = T,sep = '\t',stringsAsFactors = F)
-# only stations with viable Latitude and Longitude are useful to us, so we exclude any station that is missing the coordinate.
-geochem<-geochem[is.na(geochem$Longitude)==0,]
-geochem$x<-as.numeric(geochem$Longitude)
-geochem<-geochem[is.na(geochem$x)==0,]
-geochem$y<-as.numeric(geochem$Latitude)
-# the following two lines turns a data table to a spatial point file. We need to tell R what are the columns that
-# represent lat and long. We also need to specify the correct crs.
-coordinates(geochem) = ~x + y
-M_stn <- spTransform(M_stn, "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0") # extract crs and set well projection
-# We iterate across a list of soil geochemical properties
-chemNameList<-c('C_As', 'C_C_Inorg','C_C_Org', 'C_Hornbl','C_C_Tot','C_Na','C_Tot_Clay',
-                'C_P','C_U','C_Mo','C_Ca','C_Sr','C_Fe','C_Mn','C_V','C_Ti','C_K','C_Be',
-                'C_Tot_Plag','C_Tot_10A','C_Tot_14A','C_Tot_K_fs','C_Ni','C_Cr','C_Tot_Flds',
-                'C_Hg','C_Kaolinit','C_Pb','C_Cd','C_Li','C_Sb','C_Mg','C_Rb','C_Gypsum','C_Aragon','C_Calcite')
-fx = function(chemName) {
-  system(paste("echo '",chemName,"'"))
-  if (is.na(geochem[[chemName]])) {
-    print('variable not found!')
-  } else {
-    geochemOut <- geochem
-    geochemOut[[chemName]]<-as.numeric(geochem[[chemName]])
-    geochemOut<-geochemOut[is.na(geochemOut[[chemName]])==0,]
-
-    # for gaps on the raster, we use interpolation to fill the gaps
-    r<- raster(interp(geochemOut$x, geochemOut$y, geochemOut[[chemName]],
-                      xo=seq(min(geochemOut$x-10), max(geochemOut$x+10), length = 6000),
-                      yo=seq(min(geochemOut$y-10), max(geochemOut$y+10), length = 3000)))
-
-    return(terra::extract(r, M_stn, method='bilinear'))  # extract value for each variable
+#### Helper functions
+extract_raster_values <- function(raster_path, points_sf, column_name, method = 'bilinear', buffer_on = FALSE) {
+  # Load the raster
+  raster_layer <- raster(raster_path)
+  # Ensure points_sf is an sf object
+  if (!inherits(points_sf, "sf")) stop("points_sf must be an sf object.")
+  # if raster is missing CRS, assign the CRS to it
+  if(is.na(raster::crs(raster_layer))){
+    raster::crs(raster_layer) <- CRS('+init=epsg:5070')
   }
+  
+  # Reproject points to match the raster CRS
+  points_sf <- st_transform(points_sf, crs = st_crs(raster_layer))
+  
+  if(!buffer_on){
+    # Extract raster values to the points
+    points_sf[[column_name]] <- raster::extract(raster_layer, points_sf, method = method)
+  } else {
+    # Extract raster values to the points with a buffer
+    points_sf[[column_name]] <- raster::extract(raster_layer, points_sf, buffer = 500, fun = mean)
+  }
+  
+  # Clean up
+  rm(raster_layer)
+  gc()  # Optional: Call garbage collection
+  
+  # Notify completion
+  message(paste(column_name, "completed"))
+  
+  return(points_sf)
 }
-list = mclapply(chemNameList, fx, mc.cores = 6) # runs parallel processing
-names(list) = chemNameList # double check that no columns were skipped or returned errors
-M_stn@data = cbind(M_stn@data, data.frame(list))
-rm(geochem)
-print('geochem completed')
 
+extract_vector_values <- function(points_sf, vector_dsn, vector_layer, join_column) {
+  # Read the vector data as sf
+  vector_data <- st_read(dsn = vector_dsn, layer = vector_layer)
+  # if vector is missing CRS, assign the CRS of mapUSm to it
+  if(is.na(st_crs(vector_data))){
+    st_crs(vector_data) <- st_crs(mapUSm)
+  }
+  
+  vector_data <- st_make_valid(vector_data)
+  
+  # Transform input CRS to match the vector data CRS
+  points_sf <- st_transform(points_sf, crs = st_crs(vector_data))
+  
+  # Perform a spatial join to add the specified column from vector data
+  points_sf <- points_sf %>%
+    st_join(vector_data %>% dplyr::select(geometry, all_of(join_column)))
+  
+  # Clean up temporary variables
+  rm(vector_data)
+  
+  # Print completion message
+  print(paste(vector_layer, 'Vector data extraction completed.'))
+  
+  return(points_sf)
+}
 
-# 6) Hydrologic Landscape Regions of the US
-hlrus<-readOGR(dsn="CoVar/hlrshape",layer="hlrus")
-hlrus <- spTransform(hlrus, project.crs)
-M_stn <- spTransform(M_stn, crs(hlrus)) # extract crs and set well projection
-M_stn$SLOPE<-unlist(over(M_stn, hlrus[,"SLOPE"])) # 
-M_stn$SAND<-unlist(over(M_stn, hlrus[,"SAND"]))
-M_stn$RELIEF<-unlist(over(M_stn, hlrus[,"RELIEF"]))
-M_stn$PFLATTOT<-unlist(over(M_stn, hlrus[,"PFLATTOT"]))
-M_stn$PFLATLOW<-unlist(over(M_stn, hlrus[,"PFLATLOW"]))
-M_stn$PFLATUP<-unlist(over(M_stn, hlrus[,"PFLATUP"]))
-M_stn$HLR <- unlist(over(M_stn, hlrus[,"HLR"]))
-M_stn$AQPERMNEW <- unlist(over(M_stn, hlrus[,"AQPERMNEW"]))
-rm(hlrus)
-print('hlrus completed')
+#### Main function
+predictor_extract_function <- function(metal.code){
+  ##  Step 1. Load in WQP well location data and well measurements ------------------------------------------------------------------------------- 
+  M_stn = readRDS(paste0("Data_Files/", metal.code,"_Combined_WQP.rds")) # read in preprocessed data
+  M_stn <- st_as_sf(M_stn, coords = c("longitude", "latitude"), crs = st_crs(mapUSm))# setting initial crs
 
-# 7) Base Flow Index (integer)
-bfi_raster<- raster('CoVar/bfi48grd/bfi48grd/w001001x.adf')
-bfi_raster = projectRaster(bfi_raster, crs = project.crs) # why is it it necessary to reproject both this an the M_stn? 
-M_stn <- spTransform(M_stn, crs(bfi_raster)) # extract crs and set well projection
-M_stn$bfi<-raster::extract(bfi_raster, M_stn, method='bilinear')
-rm(bfi_raster)
-print('bfi completed')
+  ##  Step 2. Environmental predictors: extract values to wells--------------------------------------------------------------------------
+  # 1) Precipitation (mm)
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/PRISM_ppt_30yr_normal_800mM2_annual_asc/PRISM_ppt_30yr_normal_800mM2_annual_asc.asc',
+    points_sf = M_stn,
+    column_name = "ppt"
+  )
 
-# 8) Soil Properties from STATSGO
-statsgo<-readOGR(dsn="CoVar/statsgo",layer="muid_poly_with_data")
-M_stn <- spTransform(M_stn, crs(statsgo)) # extract crs and set well projection
-proplist = c('PERML','PERMH','AWCL','AWCH','BDL','BDH','OML','OMH','SLOPEL','SLOPEH','WTDEPL',
+  # 2) Annual Mean Temp (F)
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/PRISM_tmean_30yr_normal_800mM2_annual_asc/PRISM_tmean_30yr_normal_800mM2_annual_asc.asc',
+    points_sf = M_stn,
+    column_name = "tmean"
+  )
+
+  # 3) Groundwater flow parameters from Reitz et al. 2017 (800 m resolution)
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/reitz_hydrology/QuickFlow_0013/RO_0013.tif',
+    points_sf = M_stn,
+    column_name = "quickflow"
+  )
+  
+  # 4) Recharge
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/reitz_hydrology/EffRecharge_0013_v2/0013/RC_eff_0013.tif',
+    points_sf = M_stn,
+    column_name = "effrech"
+  )
+  
+  # 5) ET
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/reitz_hydrology/ET_0013/ET_0013.tif',
+    points_sf = M_stn,
+    column_name = "ET"
+  )
+
+  # 3b) Original recharge from Wolock et al. for comparison
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/rech48grd/rech48grd/w001001x.adf',
+    points_sf = M_stn,
+    column_name = "rech"
+  )
+
+  # 4) Soil Organic Content, (tons/Hectare)
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/HWSDa_OC_Dens_30SEC_US.asc',
+    points_sf = M_stn,
+    column_name = "soiloc"
+  )
+
+  # 5) Soil Geochemistry, C-horizon
+  print("started geochem")
+  # We iterate across a list of soil geochemical properties
+  chemNameList<-c('C_As', 'C_C_Inorg','C_C_Org', 'C_Hornbl','C_C_Tot','C_Na','C_Tot_Clay',
+                  'C_P','C_U','C_Mo','C_Ca','C_Sr','C_Fe','C_Mn','C_V','C_Ti','C_K','C_Be',
+                  'C_Tot_Plag','C_Tot_10A','C_Tot_14A','C_Tot_K_fs','C_Ni','C_Cr','C_Tot_Flds',
+                  'C_Hg','C_Kaolinit','C_Pb','C_Cd','C_Li','C_Sb','C_Mg','C_Rb','C_Gypsum','C_Aragon','C_Calcite')
+  
+  geochem<-read.table('CoVar/soil_geochemistry/Appendix_4b_Chorizon_18Sept2013.txt', header = T, # first row is unit
+                      sep = '\t',stringsAsFactors = F) 
+  # Drop the first observation (row)
+  geochem <- geochem[-1, ]
+  # only stations with viable Latitude and Longitude are useful to us, so we exclude any station that is missing the coordinate.
+  # convert to sf object
+  geochem_sf <- geochem |>
+    mutate(across(all_of(chemNameList), as.numeric)) |>  # Convert all columns to numeric
+    mutate(Longitude = as.numeric(as.character(Longitude)),
+           Latitude = as.numeric(as.character(Latitude))) %>%
+    filter(!is.na(Longitude) & !is.na(Latitude)) |>
+    st_as_sf(coords = c("Longitude", "Latitude"),  # Specify the columns for coordinates
+    crs = 4326)  # Set CRS to WGS84 (EPSG:4326))
+  M_stn <- st_transform(M_stn, st_crs(geochem_sf)) # extract crs and set well projection
+  
+  fx = function(chemName) {
+    system(paste("echo '",chemName,"'"))
+    geochemOut <- as(geochem_sf, "Spatial")
+    # Create an empty raster
+    r <- raster(extent(geochemOut), res = 0.5, crs = proj4string(geochemOut))
+    # Rasterize using raster
+    r <- rasterize(geochemOut, r, field = chemName, fun = mean)
+    res <- terra::extract(r, M_stn, method='bilinear')
+    return(res)  # extract value for each variable
+    }
+  list = mclapply(chemNameList, fx, mc.cores = 6) # runs parallel processing
+  names(list) = chemNameList # double check that no columns were skipped or returned errors
+  M_stn = bind_cols(M_stn, data.frame(list))
+  rm(geochem)
+  print('geochem completed')
+  
+
+  # 6) Hydrologic Landscape Regions of the US
+  hlrus<-st_read(dsn="CoVar/hlrshape/hlrus.shp")
+  hlrus <- st_transform(hlrus, st_crs(mapUSm))
+  M_stn <- st_transform(M_stn, st_crs(mapUSm)) # extract crs and set well projection
+  M_stn<-st_join(M_stn, hlrus[c("SLOPE","SAND","RELIEF","PFLATTOT","PFLATLOW","PFLATUP","HLR","AQPERMNEW")])
+  rm(hlrus)
+  print('hlrus completed')
+
+  # 7) Base Flow Index (integer)
+  M_stn <- extract_raster_values(raster_path ='CoVar/bfi48grd/bfi48grd/w001001x.adf',    
+                                 points_sf = M_stn,
+                                 column_name = "bfi")
+  # 8) Soil Properties from STATSGO
+  statsgo<-st_read(dsn="CoVar/statsgo/muid_poly_with_data.shp")
+  M_stn <- st_transform(M_stn, st_crs(statsgo)) # extract crs and set well projection
+  proplist = c('PERML','PERMH','AWCL','AWCH','BDL','BDH','OML','OMH','SLOPEL','SLOPEH','WTDEPL',
              'WTDEPH','ROCKDEPL','ROCKDEPH','KFACT','TFACT','WEG')
-fx = function(propName) {
-  # Progress report
-  system(paste("echo '",propName,"'"))
-  return(unlist(over(M_stn, statsgo[,propName])))
-}
-list = mclapply(proplist, fx, mc.cores = 6)
-names(list) = proplist
-M_stn@data = cbind(M_stn@data, data.frame(list))
-M_stn$PERMmean<-(M_stn$PERML+M_stn$PERMH)/2
-M_stn$AWCmean<-(M_stn$AWCL+M_stn$AWCH)/2
-M_stn$BDmean<-(M_stn$BDL+M_stn$BDH)/2
-M_stn$OMmean<-(M_stn$OML+M_stn$OMH)/2
-M_stn$SLOPEmean<-(M_stn$SLOPEH+M_stn$SLOPEL)/2
-M_stn$WTDEPmean<-(M_stn$WTDEPL+M_stn$WTDEPH)/2
-M_stn$ROCKDEPmean<-(M_stn$ROCKDEPL+M_stn$ROCKDEPH)/2
-rm(statsgo, list)
-print('statsgo completed')
+  M_stn<-st_join(M_stn, statsgo[proplist])
+  M_stn <- M_stn %>%
+    mutate(
+      PERMmean = (PERML + PERMH) / 2,
+      AWCmean = (AWCL + AWCH) / 2,
+      BDmean = (BDL + BDH) / 2,
+      OMmean = (OML + OMH) / 2,
+      SLOPEmean = (SLOPEL + SLOPEH) / 2,
+      WTDEPmean = (WTDEPL + WTDEPH) / 2,
+      ROCKDEPmean = (ROCKDEPL + ROCKDEPH) / 2
+    )
+  rm(statsgo)
+  print('statsgo completed')
 
 
-# 9) Bedrock Geology: King and Beikman 
-KB<-readOGR(dsn="CoVar/kbgeology",layer="kbge")
-M_stn <- spTransform(M_stn, crs(KB))
-M_stn$KB<-unlist(over(M_stn, KB[,"UNIT"]))
-rm(KB)
-print('bedrock geology completed')
+  # 9) Bedrock Geology: King and Beikman 
+  M_stn <- extract_vector_values(M_stn, "CoVar/kbgeology", "kbge", "UNIT") |>
+    rename(KB = UNIT)
+  print('bedrock geology completed')
 
 
-# 10) Surficial Geology 
-surfgeo <- readOGR(dsn="CoVar/Soller_surfgeo/USGS_DS_425_SHAPES", layer='Surficial_materials')
-M_stn <- spTransform(M_stn, crs(surfgeo))
-M_stn$surfgeo <- unlist(over(M_stn, surfgeo['UNIT_NAME']))
-rm(surfgeo)
-print('surface geology completed')
+  # 10) Surficial Geology
+  M_stn <- extract_vector_values(M_stn, "CoVar/Soller_surfgeo/USGS_DS_425_SHAPES", "Surficial_materials", "UNIT_NAME")|>
+    rename(surfgeo = UNIT_NAME)
+  print('surface geology completed')
+
+  # 10) Generalized Lithology
+  rocktype <- data.table::fread("CoVar/Anning_Schweitzer_lithology/geol_poly_rocktypes.csv") %>%
+    distinct(UNIT_LINK, rocktype) %>%     # Retain unique UNIT_LINK and rocktype pairs
+    group_by(UNIT_LINK) %>%              # Group by UNIT_LINK
+    slice_min(order_by = rocktype, n = 1) %>% # Select the first rocktype per group
+    ungroup() 
+  lith<-st_read("CoVar/Anning_Schweitzer_lithology/geol_poly/geol_poly.shp") |>
+    left_join(rocktype, by=c("UNIT_LINK"="UNIT_LINK")) 
+  M_stn <- st_transform(M_stn, st_crs(lith)) |>
+    st_join(lith['rocktype'])
+  rm(lith)
+  rm(rocktype)
+  print ('generalized lithology completed')
+
+  # 11) Land Cover  
+  nlcd <- read.csv('CoVar/nlcd2011/AllUniqueWells_20230306_nlcd2011.csv')
+  nlcd_cat <- read.csv('CoVar/nlcd2011/AllUniqueWells_20230306_nlcd2011_bycat.csv')
+  
+  # join majority landcover type
+  nlcd <- nlcd %>% 
+    dplyr::select(location_id, MAJORITY) %>% 
+    dplyr::rename('landcover_500m' = 'MAJORITY','location.id'='location_id')
+  M_stn <- dplyr::left_join(M_stn, nlcd, by='location.id')
+
+  # join % of each landcover type
+  nlcd_cat <- nlcd_cat %>% 
+    dplyr::select(-c(OBJECTID)) %>% 
+    dplyr::mutate(sum = rowSums(across(where(is.numeric)), na.rm=TRUE)) 
+  nlcd_pct <- nlcd_cat %>% 
+    dplyr::mutate_at(vars(VALUE_0:sum), list(pct=~./sum)) %>% 
+    dplyr::select(LOCATION_ID, contains('pct'), -sum_pct) %>%
+    dplyr::rename('location.id'='LOCATION_ID')
+  M_stn <- dplyr::left_join(M_stn, nlcd_pct, by='location.id')
+  rm(nlcd, nlcd_cat, nlcd_pct)
+
+  # # 12) County level drainage data, divide best guess drainage acre by total area, percent
+  # drainage <- raster('CoVar/usgs_tiledrainage/SubsurfaceDrainExtentUS_90s.tif')
+  # # original resolution is 30 meters, too fine, aggregate by 20 times
+  # drainage <- aggregate(drainage, fact = 20, fun = mean)
+  # writeRaster(drainage, "CoVar/usgs_tiledrainage/SubsurfaceDrainExtentUS_90s_agg.tif", overwrite = TRUE)
+
+  M_stn <- extract_raster_values('CoVar/usgs_tiledrainage/SubsurfaceDrainExtentUS_90s_agg.tif',
+                                 M_stn,
+                                 'drainage',
+                                 method = 'bilinear')
+
+  # 13) stream density
+  M_stn <- extract_raster_values('CoVar/stmdenhuc12/w001001.adf', 
+                                 M_stn,
+                                 'stn_den',
+                                 method = 'bilinear')
+
+  # 14) Surficial groundwater flow parameters (MODFLOW 6) (250 m resolution)
+  M_stn <- extract_raster_values('CoVar/modflow6_surfgw/Output_CONUS_trans_dtw/conus_MF6_SS_Unconfined_250_dtw.tif', 
+                                 M_stn,
+                                 'dtw',
+                                 buffer_on = TRUE)
+  M_stn <- extract_raster_values('CoVar/modflow6_surfgw/Output_CONUS_trans_dtw/conus_MF6_SS_Unconfined_250_trans.tif', 
+                                 M_stn,
+                                 'trans',
+                                 buffer_on = TRUE)
+  M_stn <- extract_raster_values('CoVar/modflow6_surfgw/Output_CONUS_unsat_traveltime/conus_MF6_SS_Unconfined_250_tt_total.tif', 
+                                 M_stn,
+                                 'unsatTT',
+                                 buffer_on = TRUE)
+  M_stn <- extract_raster_values('CoVar/modflow6_surfgw/Output_CONUS_unsat_watercontent/conus_MF6_SS_Unconfined_250_wc_avg.tif', 
+                                 M_stn,
+                                 'unsatWC',
+                                 buffer_on = TRUE)
+  print('groundwater flow parameters completed')
 
 
-# 10) Generalized Lithology
-lith<-readOGR(dsn="CoVar/Anning_Schweitzer_lithology/geol_poly",layer="geol_poly")
-rocktype <- data.table::fread("CoVar/Anning_Schweitzer_lithology/geol_poly_rocktypes.csv")
-rocktype <- unique(rocktype[,c('UNIT_LINK','rocktype')])
-rocktype <- rocktype %>% group_by(UNIT_LINK) %>% arrange(rocktype) %>% filter(row_number()==1) # not sure how else to choose when there are duplicates
-lith@data <- merge(lith@data, rocktype, by='UNIT_LINK')
-M_stn <- spTransform(M_stn, crs(lith))
-M_stn$lith <- unlist(over(M_stn, lith[,"rocktype"]))
-rm(lith)
-rm(rocktype)
-print ('generalized lithology completed')
+  # 15) Aquifer
+  M_stn <- extract_vector_values(M_stn, 
+                        "CoVar/aquifrp025_nt00003", 
+                        "aquifrp025",
+                        c("AQ_CODE", "ROCK_TYPE"))
 
-
-# 11) Land Cover  
-nlcd <- read.csv('CoVar/nlcd2011/AllUniqueWells_20230306_nlcd2011.csv')
-nlcd_cat <- read.csv('CoVar/nlcd2011/AllUniqueWells_20230306_nlcd2011_bycat.csv')
-
-# join majority landcover type
-nlcd <- nlcd %>% dplyr::select(location_id, MAJORITY) %>% dplyr::rename('landcover_500m' = 'MAJORITY','location.id'='location_id')
-M_stn@data <- dplyr::left_join(M_stn@data, nlcd, by='location.id')
-
-# join % of each landcover type
-nlcd_cat <- nlcd_cat %>% dplyr::select(-c(OBJECTID)) %>% dplyr::mutate(sum = rowSums(across(where(is.numeric)), na.rm=TRUE)) # they don't all sum to the same value -- is that a problem?
-nlcd_pct <- nlcd_cat %>% dplyr::mutate_at(vars(VALUE_0:sum), list(pct=~./sum)) %>% 
-  dplyr::select(LOCATION_ID, contains('pct'), -sum_pct) %>%
-  dplyr::rename('location.id'='LOCATION_ID')
-M_stn@data <- left_join(M_stn@data, nlcd_pct, by='location.id')
-
-
-rm(nlcd, nlcd_cat, nlcd_pct)
-
-## SAVE OUT TEMPORARILY; SWITCH R VERSIONS
-filename = paste0("R_Output/",folder.name,metal.code,"_halfpredictors", version.number,".rds")
-#saveRDS(M_stn, filename)
-M_stn = readRDS(filename)
-head(M_stn@data)
-
-buffer.time = proc.time()
-
-# 12) County level drainage data, divide best guess drainage acre by total area, percent
-drainage<-raster('CoVar/usgs_tiledrainage/SubsurfaceDrainExtentUS_90s.tif') # aea, units m
-M_stn <- spTransform(M_stn, crs(drainage))
-M_stn$drainage<-terra::extract(drainage, M_stn, buffer=500, fun=mean, na.rm=TRUE)
-rm(drainage)
-print('drainage completed')
-
-# 13) stream density
-stmden_raster<- raster('CoVar/stmdenhuc12/w001001.adf') 
-M_stn <- spTransform(M_stn, crs(stmden_raster))
-M_stn$stm_den <- raster::extract(stmden_raster, M_stn, method='bilinear')
-rm(stmden_raster)
-print('stream density completed')
-
-# 14) Surficial groundwater flow parameters (MODFLOW 6) (250 m resolution)
-dtw <- raster('CoVar/modflow6_surfgw/Output_CONUS_trans_dtw/conus_MF6_SS_Unconfined_250_dtw.tif') # depth to water
-M_stn <- spTransform(M_stn, crs(dtw)) # raster too big to transform, so transform points to raster
-M_stn$dtw <- terra::extract(dtw, M_stn,buffer=500, fun=mean) 
-rm(dtw)
-
-trans <- raster('CoVar/modflow6_surfgw/Output_CONUS_trans_dtw/conus_MF6_SS_Unconfined_250_trans.tif') # transmissivity
-M_stn$trans <- raster::extract(trans, M_stn, buffer=500, fun=mean) 
-rm(trans)
-
-unsatTT <- raster('CoVar/modflow6_surfgw/Output_CONUS_unsat_traveltime/conus_MF6_SS_Unconfined_250_tt_total.tif') # transmissivity
-M_stn$unsatTT <- raster::extract(unsatTT, M_stn, buffer=500, fun=mean) 
-rm(unsatTT)
-
-unsatWC <- raster('CoVar/modflow6_surfgw/Output_CONUS_unsat_watercontent/conus_MF6_SS_Unconfined_250_wc_avg.tif')
-M_stn$unsatWC <- raster::extract(unsatWC, M_stn, buffer=500, fun=mean) 
-rm(unsatWC)
-
-print('groundwater flow parameters completed')
-
-
-# 15) Aquifer
-aquifer <-  readOGR(dsn="CoVar/aquifrp025_nt00003", layer="aquifrp025")
-proj4string(aquifer) <-  crs(project.crs) # project it in the first place; none was assigned
-M_stn <- spTransform(M_stn, crs(aquifer))
-M_stn$aquifer<-unlist(over(M_stn, aquifer[,c("AQ_CODE")])) 
-M_stn$aq_rocktype<-unlist(over(M_stn, aquifer[,c("ROCK_TYPE")])) 
-rm(aquifer)
-print('aquifer code completed')
-
-
-# 16) Soil Properties Rasters (UCDAVIS - combined SSURGO and STATSGO 800m rasters)
-# http://soilmap2-1.lawr.ucdavis.edu/soil-properties/download.php
-for (filename in list.files(path="CoVar/soil_properties")) {
-  property <-  raster(paste0("CoVar/soil_properties/",filename))
-  M_stn <- spTransform(M_stn, crs(property)) # extract crs and' set well projection
-  prop_name = tools::file_path_sans_ext(filename)
-  if (grepl("int",filename)) {
-    M_stn[[prop_name]] <- raster::extract(property, M_stn, method='simple')
-  } else {
-    M_stn[[prop_name]] <- raster::extract(property, M_stn, method='bilinear')
+  # 16) Soil Properties Rasters (UCDAVIS - combined SSURGO and STATSGO 800m rasters)
+  # http://soilmap2-1.lawr.ucdavis.edu/soil-properties/download.php
+  for (filename in list.files(path="CoVar/soil_properties")) {
+    if (grepl("int",filename)){
+      M_stn <- extract_raster_values(paste0("CoVar/soil_properties/",filename), 
+                                     M_stn, 
+                                     tools::file_path_sans_ext(filename),
+                                     method = 'simple')
+    } else {
+      M_stn <- extract_raster_values(paste0("CoVar/soil_properties/",filename), 
+                                     M_stn, 
+                                     tools::file_path_sans_ext(filename))
+    }
   }
-  print(paste(prop_name,'completed'))
-}
-rm(property)
 
 
-# 17) Soil Property Rasters Part II (USGS SSURGO area- and depth-weighted 90m rasters)
-# read in parameter values for each well as calculated in ArcGIS & merge based on well name / location ID 
-for (filename in list.files(path="CoVar/SSURGO90m/well_data")) {
-  tbl = read_excel(paste0('CoVar/SSURGO90m/well_data/',filename))
-  name = str_replace(filename, 'AllUniqueWells_mean_', '') %>% str_remove('.xlsx')
-  tbl = tbl %>% dplyr::select('location_id','MEAN') %>% dplyr::rename(!!name := 'MEAN','location.id'='location_id')
-  M_stn@data <- dplyr::left_join(M_stn@data, tbl, by='location.id')
-  print(paste(name,'completed'))
-} 
-
-rm(tbl)
+  # 17) Soil Property Rasters Part II (USGS SSURGO area- and depth-weighted 90m rasters)
+  # read in parameter values for each well as calculated in ArcGIS & merge based on well name / location ID 
+  for (filename in list.files(path="CoVar/SSURGO90m/well_data")) {
+    tbl = read_excel(paste0('CoVar/SSURGO90m/well_data/',filename))
+    name = str_replace(filename, 'AllUniqueWells_mean_', '') %>% str_remove('.xlsx')
+    tbl = tbl %>% dplyr::select('location_id','MEAN') %>% dplyr::rename(!!name := 'MEAN','location.id'='location_id')
+    M_stn <- dplyr::left_join(M_stn, tbl, by='location.id')
+    print(paste(name,'completed'))
+  } 
+  
+  rm(tbl)
 
 
 # 18) Predicted Groundwater NO3 (Ransom et al. 2021, 1 km resolution)
 # groundwater no3 predicted at domestic well depths
-no3_dom = raster('CoVar/USGS_NO3/no3_doms.asc')
-proj4string(no3_dom) = CRS('+init=epsg:5070')
-# crs(no3_dom) = "EPSG:5070" # works in R 4.2.2
-M_stn <- spTransform(M_stn, crs(no3_dom)) 
-M_stn$no3_dom = terra::extract(no3_dom, M_stn, method='bilinear')
-rm(no3_dom)
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/USGS_NO3/no3_doms.asc',
+    points_sf = M_stn,
+    column_name = "no3_dom"
+  )
+  # groundwater no3 predicted at public well depths
+  M_stn <- extract_raster_values(
+    raster_path = 'CoVar/USGS_NO3/no3_pubs.asc',
+    points_sf = M_stn,
+    column_name = "no3_pub"
+  )
 
-# groundwater no3 predicted at public well depths
-no3_pub = raster('CoVar/USGS_NO3/no3_pubs.asc')
-proj4string(no3_pub) = CRS('+init=epsg:5070')
-# crs(no3_pub) = "EPSG:5070"
-M_stn <- spTransform(M_stn, crs(no3_pub)) 
-M_stn$no3_pub = terra::extract(no3_pub, M_stn, method='bilinear')
-rm(no3_pub)
-
-
-###  Step 3. Anthropogenic impacts: extract values to wells --------------------------------------------------------------------------------------
-## Read in functions for each calculation
-# Function to calculate impact for a given well
-calc.TRI.impact <- function(xrow, df) { 
-  # for each well, select sources in the same HUC12
-  xlist = unlist(xrow) # longitude, latitude, huc12, elevation, year
-  ptsrc <- subset(df, (huc12==xlist[3]) & (elevation > xlist[4])) 
-  impact = 0
-  if (nrow(ptsrc)>0) {
-    #print('there are impacts')
-    for (j in 1:nrow(ptsrc)) {
-      # calculate the distance between the well and the contamination site
-      dist = distm(c(xlist[1],xlist[2]), coordinates(ptsrc[j,]), fun=distHaversine)/1000
-      # find/calculate release volume for that well and year
-      release = ptsrc[j,]@data %>% dplyr::select(contains(as.character(xlist[5]))) # dplyr; if this is slow data.table is faster
-      # calculate the impact at the well for the given contamination site
-      w = release/exp(dist)
-      # sum impacts across contamination sites associated with a well
-      impact = impact + w
-      #print(impact)
-    } # else, there is no impact so leave it at 0
+  ###  Step 3. Anthropogenic impacts: extract values to wells --------------------------------------------------------------------------------------
+  ## Read in functions for each calculation
+  # Function to calculate impact for a given well
+  calc.TRI.impact <- function(xrow, df) { 
+    # for each well, select sources in the same HUC12
+    xlist = unlist(xrow) # longitude, latitude, huc12, elevation, year
+    ptsrc <- subset(df, (huc12==xlist[3]) & (elevation > xlist[4])) 
+    impact = 0
+    if (nrow(ptsrc)>0) {
+      #print('there are impacts')
+      for (j in 1:nrow(ptsrc)) {
+        # calculate the distance between the well and the contamination site
+        dist = distm(c(xlist[1],xlist[2]), coordinates(ptsrc[j,]), fun=distHaversine)/1000
+        # find/calculate release volume for that well and year
+        release = ptsrc[j,]@data %>% dplyr::select(contains(as.character(xlist[5]))) # dplyr; if this is slow data.table is faster
+        # calculate the impact at the well for the given contamination site
+        w = release/exp(dist)
+        # sum impacts across contamination sites associated with a well
+        impact = impact + w
+        #print(impact)
+      } # else, there is no impact so leave it at 0
+    }
+    return(impact)
   }
-  return(impact)
-}
-
-# Function to calculate impact for a given well
-calc.SEMS.impact <- function(xrow, df) {
-  # for each well, select sources in the same HUC12
-  xlist = unlist(xrow) # longitude, latitude, huc12, elevation
-  ptsrc <- subset(df, (huc12==xlist[3]) & (elevation > xlist[4]))
-  impact = 0
-  if (nrow(ptsrc)>0) {
-    for (j in 1:nrow(ptsrc)) {
-      dist = distm(c(xlist[1],xlist[2]), coordinates(ptsrc[j,]), fun=distHaversine)/1000
-      w = 1/exp(dist)
-      impact = impact + w
-    } # else, there is no impact so leave it at 0
+  
+  # Function to calculate impact for a given well
+  calc.SEMS.impact <- function(xrow, df) {
+    # for each well, select sources in the same HUC12
+    xlist = unlist(xrow) # longitude, latitude, huc12, elevation
+    ptsrc <- subset(df, (huc12==xlist[3]) & (elevation > xlist[4]))
+    impact = 0
+    if (nrow(ptsrc)>0) {
+      for (j in 1:nrow(ptsrc)) {
+        dist = distm(c(xlist[1],xlist[2]), coordinates(ptsrc[j,]), fun=distHaversine)/1000
+        w = 1/exp(dist)
+        impact = impact + w
+      } # else, there is no impact so leave it at 0
+    }
+    return(impact)
   }
-  return(impact)
-}
 
-# Function to prepare well data for anthropogenic impact calculations 
-load("Covar/huc12.rdata")  
-elevation = raster("Covar/Elevation_US.tif")
+  # Function to prepare well data for anthropogenic impact calculations 
+  gdb_path <- "CoVar/WBD_National_GDB/WBD_National_GDB.gdb"
+  huc12 <- st_read(dsn = gdb_path, layer = "WBDHU12") |>
+    st_make_valid()
+  elevation <- raster("Covar/Elevation_US.tif")
 
-df.impact.prep <- function(M_stn) {
-  ## Prepare well data for anthropogenic impact calculations
-  # Attach HUC data to sites
-  M_stn <- spTransform(M_stn, crs(huc12))
-  M_stn$huc12 <- unlist(over(M_stn, huc12[,"huc12"])) 
-  
-  # Attach elevation data to sites
-  M_stn <- spTransform(M_stn, crs(elevation)) # extract crs and set well projection
-  M_stn$elevation <- raster::extract(elevation, M_stn, method='bilinear')
-  
-  print('well position data preprocessed')
-  return(M_stn)
-}
+  prepare_well_impact <- function(M_stn) {
+    ## Prepare well data for anthropogenic impact calculations
+    # Attach HUC data to sites
+    M_stn <- st_transform(M_stn, st_crs(huc12))
+    M_stn <- st_join(M_stn, huc12["huc12"]) 
+    
+    # Attach elevation data to sites
+    M_stn <- extract_raster_values(
+      raster_path = "Covar/Elevation_US.tif",
+      points_sf = M_stn,
+      column_name = "elevation"
+    )
+    print('well position data preprocessed')
+    return(M_stn)
+  }
 
 # Function to extract TRI data and add it to the dataframe
-df.TRI.impact <- function(M_stn, metal.code) {
+extract_TRI_impact <- function(M_stn, metal.code) {
   ## 19) TRI onsite releases
   # A) prepare site data
   # read in dataframe of cumulative TRI impacts (see TRI_US_Sums.R)
   print(metal.code)
   TRI.onsite <- read.csv(paste0('TRI_US/TRI.', metal.code,'.onsite.cumulativeSums.csv'))
-  coordinates(TRI.onsite) = ~LONGITUDE + LATITUDE
+  TRI.onsite <- st_as_sf(TRI.onsite,
+                         coords = c("LONGITUDE", "LATITUDE"),
+                         crs = 4326)
   # attach huc12 to TRI sites
-  proj4string(TRI.onsite) <- crs(huc12)
-  TRI.onsite$huc12 <- unlist(over(TRI.onsite, huc12[,'huc12']))
+  TRI.onsite <- st_transform(TRI.onsite, st_crs(huc12))
+  TRI.onsite <- st_join(TRI.onsite, huc12['huc12'])
   # attach elevations to TRI sites
-  TRI.onsite <- spTransform(TRI.onsite, crs(elevation)) # extract crs and set well projection
-  TRI.onsite$elevation <- raster::extract(elevation, TRI.onsite, method='bilinear')
-  print('TRI onsite site position data preprocessed')
+  M_stn <- extract_raster_values(
+    raster_path = "Covar/Elevation_US.tif",
+    points_sf = TRI.onsite,
+    column_name = "elevation"
+  )
   
   # B) calculate impact
   # create list of wells to iterate over
@@ -430,7 +457,7 @@ df.TRI.impact <- function(M_stn, metal.code) {
 }
 
 # Function to extract SEMS data and add it to the dataframe
-df.SEMS.impact <- function(M_stn, metal.code) {
+extract_SEMS_impact <- function(M_stn, metal.code) {
   # 21) SEMS Impact 
   # A) Attach HUC and elevation data to sources
   # read in and clean data
@@ -461,12 +488,13 @@ df.SEMS.impact <- function(M_stn, metal.code) {
 }
 
 ## Calculate impact
-M_stn = df.impact.prep(M_stn)
-M_stn = df.TRI.impact(M_stn, metal.code)
-M_stn = df.SEMS.impact(M_stn, metal.code)
+M_stn = prepare_well_impact(M_stn)
+M_stn = extract_TRI_impact(M_stn, metal.code)
+M_stn = extract_SEMS_impact(M_stn, metal.code)
 
 # Drop huc12 and elevation as columns
-M_stn@data = subset(M_stn@data, select = -c(huc12,elevation)) 
+M_stn <-  M_stn |>
+  dplyr::select(-c(huc12,elevation)) 
 
 
 ## Step 4. Post-Process Extracted Data --------------------------------------------------------------------------------------------------------------------
@@ -496,6 +524,7 @@ M_stn$HLR = fac
 # save the data file out
 saveRDS(M_stn, paste0("R_Output/",folder.name,metal.code,"_RawPredictors.rds"))
 print("Covariables Extracted")
+}
 
 ## Step 5. Refine the Data Frame with Data Imputation -----------------------------------------------------------------------------------------------------
 # This section fills in missing values with imputed values using a K-nearest neighbors imputation

@@ -9,75 +9,22 @@
 packages <- c('akima','beepr','chron','foreign','geosphere','ggplot2','gstat', 'lattice','NADA','plyr', 
               'parallel','raster', 'readxl','sf','stringr','terra','tiff','VIM','dplyr')
 lapply(packages, library, character.only=TRUE)
+source(here::here('R/0_helper_fct.R'))
 
 setwd(here::here("data"))
 mapUSm <- st_read("CoVar/US48/US_48states.shp") # load projected map of the US (in m)
+huc12 <- st_read(dsn = "CoVar/WBD_National_GDB/WBD_National_GDB.gdb", layer = "WBDHU12") |> st_make_valid()
+elevation <- raster("Covar/Elevation_US.tif")
 
 #### Define Model Version ####
 metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
 metals <- c("Arsenic", "Cadmium",  "Lithium", "Manganese", "Strontium")
 names(metals) <- metal.codes
 
-#### Helper functions
-extract_raster_values <- function(raster_path, points_sf, column_name, method = 'bilinear', buffer_on = FALSE) {
-  # Load the raster
-  raster_layer <- raster(raster_path)
-  # Ensure points_sf is an sf object
-  if (!inherits(points_sf, "sf")) stop("points_sf must be an sf object.")
-  # if raster is missing CRS, assign the CRS to it
-  if(is.na(raster::crs(raster_layer))){
-    raster::crs(raster_layer) <- CRS('+init=epsg:5070')
-  }
-  
-  # Reproject points to match the raster CRS
-  points_sf <- st_transform(points_sf, crs = st_crs(raster_layer))
-  
-  if(!buffer_on){
-    # Extract raster values to the points
-    points_sf[[column_name]] <- raster::extract(raster_layer, points_sf, method = method)
-  } else {
-    # Extract raster values to the points with a buffer
-    points_sf[[column_name]] <- raster::extract(raster_layer, points_sf, buffer = 500, fun = mean)
-  }
-  
-  # Clean up
-  rm(raster_layer)
-  gc()  # Optional: Call garbage collection
-  
-  # Notify completion
-  message(paste(column_name, "completed"))
-  
-  return(points_sf)
-}
-
-extract_vector_values <- function(points_sf, vector_dsn, vector_layer, join_column) {
-  # Read the vector data as sf
-  vector_data <- st_read(dsn = vector_dsn, layer = vector_layer)
-  # if vector is missing CRS, assign the CRS of mapUSm to it
-  if(is.na(st_crs(vector_data))){
-    st_crs(vector_data) <- st_crs(mapUSm)
-  }
-  
-  vector_data <- st_make_valid(vector_data)
-  
-  # Transform input CRS to match the vector data CRS
-  points_sf <- st_transform(points_sf, crs = st_crs(vector_data))
-  
-  # Perform a spatial join to add the specified column from vector data
-  points_sf <- points_sf %>%
-    st_join(vector_data %>% dplyr::select(geometry, all_of(join_column)))
-  
-  # Clean up temporary variables
-  rm(vector_data)
-  
-  # Print completion message
-  print(paste(vector_layer, 'Vector data extraction completed.'))
-  
-  return(points_sf)
-}
-
 #### Main function
 predictor_extract_function <- function(metal.code){
+  print(paste('Start extracting predictor values for', metal.code))
+  
   ##  Step 1. Load in WQP well location data and well measurements ------------------------------------------------------------------------------- 
   M_stn = readRDS(paste0("Data_Files/", metal.code,"_Combined_WQP.rds")) # read in preprocessed data
   M_stn <- st_as_sf(M_stn, coords = c("longitude", "latitude"), crs = st_crs(mapUSm))# setting initial crs
@@ -322,8 +269,8 @@ predictor_extract_function <- function(metal.code){
   rm(tbl)
 
 
-# 18) Predicted Groundwater NO3 (Ransom et al. 2021, 1 km resolution)
-# groundwater no3 predicted at domestic well depths
+  # 18) Predicted Groundwater NO3 (Ransom et al. 2021, 1 km resolution)
+  # groundwater no3 predicted at domestic well depths
   M_stn <- extract_raster_values(
     raster_path = 'CoVar/USGS_NO3/no3_doms.asc',
     points_sf = M_stn,
@@ -336,279 +283,31 @@ predictor_extract_function <- function(metal.code){
     column_name = "no3_pub"
   )
 
-  ###  Step 3. Anthropogenic impacts: extract values to wells --------------------------------------------------------------------------------------
-  ## Read in functions for each calculation
-  # Function to calculate impact for a given well
-  calc.TRI.impact <- function(xrow, df) { 
-    # for each well, select sources in the same HUC12
-    xlist = unlist(xrow) # longitude, latitude, huc12, elevation, year
-    ptsrc <- subset(df, (huc12==xlist[3]) & (elevation > xlist[4])) 
-    impact = 0
-    if (nrow(ptsrc)>0) {
-      #print('there are impacts')
-      for (j in 1:nrow(ptsrc)) {
-        # calculate the distance between the well and the contamination site
-        dist = distm(c(xlist[1],xlist[2]), coordinates(ptsrc[j,]), fun=distHaversine)/1000
-        # find/calculate release volume for that well and year
-        release = ptsrc[j,]@data %>% dplyr::select(contains(as.character(xlist[5]))) # dplyr; if this is slow data.table is faster
-        # calculate the impact at the well for the given contamination site
-        w = release/exp(dist)
-        # sum impacts across contamination sites associated with a well
-        impact = impact + w
-        #print(impact)
-      } # else, there is no impact so leave it at 0
-    }
-    return(impact)
-  }
+  ## 19) Anthropogenic impacts
   
-  # Function to calculate impact for a given well
-  calc.SEMS.impact <- function(xrow, df) {
-    # for each well, select sources in the same HUC12
-    xlist = unlist(xrow) # longitude, latitude, huc12, elevation
-    ptsrc <- subset(df, (huc12==xlist[3]) & (elevation > xlist[4]))
-    impact = 0
-    if (nrow(ptsrc)>0) {
-      for (j in 1:nrow(ptsrc)) {
-        dist = distm(c(xlist[1],xlist[2]), coordinates(ptsrc[j,]), fun=distHaversine)/1000
-        w = 1/exp(dist)
-        impact = impact + w
-      } # else, there is no impact so leave it at 0
-    }
-    return(impact)
-  }
+  M_stn <- M_stn %>%
+    prepare_well_impact() 
+  
+  M_stn <- M_stn %>%
+    extract_TRI_impact(metal.code) %>%
+    extract_SEMS_impact(metal.code)
 
-  # Function to prepare well data for anthropogenic impact calculations 
-  gdb_path <- "CoVar/WBD_National_GDB/WBD_National_GDB.gdb"
-  huc12 <- st_read(dsn = gdb_path, layer = "WBDHU12") |>
-    st_make_valid()
-  elevation <- raster("Covar/Elevation_US.tif")
+  # Drop huc12 and elevation as columns
+  M_stn <-  M_stn |>
+    dplyr::select(-c(huc12,elevation)) 
 
-  prepare_well_impact <- function(M_stn) {
-    ## Prepare well data for anthropogenic impact calculations
-    # Attach HUC data to sites
-    M_stn <- st_transform(M_stn, st_crs(huc12))
-    M_stn <- st_join(M_stn, huc12["huc12"]) 
-    
-    # Attach elevation data to sites
-    M_stn <- extract_raster_values(
-      raster_path = "Covar/Elevation_US.tif",
-      points_sf = M_stn,
-      column_name = "elevation"
-    )
-    print('well position data preprocessed')
-    return(M_stn)
-  }
 
-# Function to extract TRI data and add it to the dataframe
-extract_TRI_impact <- function(M_stn, metal.code) {
-  ## 19) TRI onsite releases
-  # A) prepare site data
-  # read in dataframe of cumulative TRI impacts (see TRI_US_Sums.R)
-  print(metal.code)
-  TRI.onsite <- read.csv(paste0('TRI_US/TRI.', metal.code,'.onsite.cumulativeSums.csv'))
-  TRI.onsite <- st_as_sf(TRI.onsite,
-                         coords = c("LONGITUDE", "LATITUDE"),
-                         crs = 4326)
-  # attach huc12 to TRI sites
-  TRI.onsite <- st_transform(TRI.onsite, st_crs(huc12))
-  TRI.onsite <- st_join(TRI.onsite, huc12['huc12'])
-  # attach elevations to TRI sites
-  M_stn <- extract_raster_values(
-    raster_path = "Covar/Elevation_US.tif",
-    points_sf = TRI.onsite,
-    column_name = "elevation"
-  )
+  ## Step 4. Post-Process Extracted Data --------------------------------------------------------------------------------------------------------------------
+  # Convert Categorical Variables to Factors
+  M_stn <- M_stn %>%
+    mutate(across(c(landcover_500m, AQ_CODE, ROCK_TYPE, rocktype, 
+                    soilorder_int, str_int, weg_int, hydgrp_int, 
+                    drainage_class_int, HLR), as.factor))
   
-  # B) calculate impact
-  # create list of wells to iterate over
-  wells.list = split(c(coordinates(M_stn), as.numeric(M_stn$huc12), M_stn$elevation, as.integer(format(M_stn$date, format="%Y"))), seq(nrow(M_stn)))
-  # Iterate over each well
-  impacts = lapply(wells.list, function(x) calc.TRI.impact(x, TRI.onsite))
-  # Add impacts as a column to M_stn
-  M_stn@data$TRI.total.impact <- unlist(impacts) 
-  print('TRI onsite impacts completed')
-  
-  #ggplot(M_stn@data) + geom_density(aes(log10(M_stn$TRI.onsite)))
-  
-  # 20) TRI water releases
-  # A) prepare site data
-  # read in dataframe 
-  TRI.water <- read.csv(paste0('TRI_US/TRI.', metal.code,'.water.cumulativeSums.csv'))
-  coordinates(TRI.water) = ~LONGITUDE + LATITUDE
-  # attach huc12 to TRI sites
-  proj4string(TRI.water) <- crs(huc12)
-  TRI.water$huc12 <- unlist(over(TRI.water, huc12[,'huc12']))
-  # attach elevations to TRI sites
-  TRI.water <- spTransform(TRI.water, crs(elevation)) # extract crs and set well projection
-  TRI.water$elevation <- raster::extract(elevation, TRI.water, method='bilinear')
-  print('TRI water site position data preprocessed')
-  
-  # B) calculate impact
-  # create list of wells to iterate over
-  wells.list = split(c(coordinates(M_stn), as.numeric(M_stn$huc12), M_stn$elevation, as.integer(format(M_stn$date, format="%Y"))), seq(nrow(M_stn)))
-  # Iterate over each well
-  impacts = lapply(wells.list, function(x) calc.TRI.impact(x, TRI.water))
-  # Add impacts as a column to M_stn
-  M_stn@data$TRI.water.impact <- unlist(impacts) 
-  print('TRI water impacts completed')
-  
-  return(M_stn)
-
+  # save the data file out
+  saveRDS(M_stn, paste0("R_Output/",metal.code,"_RawPredictors.rds"))
+  print("Covariables Extracted")
 }
 
-# Function to extract SEMS data and add it to the dataframe
-extract_SEMS_impact <- function(M_stn, metal.code) {
-  # 21) SEMS Impact 
-  # A) Attach HUC and elevation data to sources
-  # read in and clean data
-  SEMS <- read.csv(paste0('CoVar/NPL/SEMS_',metal.code,'_cleaned.csv'))
-  SEMS$NPL.STATUS[SEMS$NPL.STATUS == 'FALSE'] = 'F' # when is this needed? 
-  SEMS <- subset(SEMS, NPL.STATUS=='F') # F means "final"
-  coordinates(SEMS) = ~Longitude + Latitude 
-  SEMS.coords <- coordinates(SEMS)
-  # attach huc12
-  proj4string(SEMS) <- crs(huc12)
-  SEMS$huc12 <- unlist(over(SEMS, huc12[,'huc12']))
-  # attach elevation
-  SEMS <- spTransform(SEMS, crs(elevation)) # extract crs and set well projection
-  SEMS$elevation <- raster::extract(elevation, SEMS, method='bilinear')
-  print('SEMS site position data preprocessed')
-
-  # B) Calculate impact for each well
-  # create list of wells to iterate over
-  wells.list = split(c(coordinates(M_stn), as.numeric(M_stn$huc12), M_stn$elevation), seq(nrow(M_stn)))
-  # Iterate over each well
-  impacts = lapply(wells.list, function(x) calc.SEMS.impact(x, SEMS))
-  # Add impacts as a column to M_stn
-  M_stn@data$SEMS <- as.numeric(impacts) # count: for Cd, 906 wells have some type of SEMS impact 
-  print('SEMS completed')
-  
-  return(M_stn)
-  
-}
-
-## Calculate impact
-M_stn = prepare_well_impact(M_stn)
-M_stn = extract_TRI_impact(M_stn, metal.code)
-M_stn = extract_SEMS_impact(M_stn, metal.code)
-
-# Drop huc12 and elevation as columns
-M_stn <-  M_stn |>
-  dplyr::select(-c(huc12,elevation)) 
-
-
-## Step 4. Post-Process Extracted Data --------------------------------------------------------------------------------------------------------------------
-# Convert Categorical Variables to Factors
-# For some reason, this only works with the intermediate variable "fac"
-fac = as.factor(M_stn$landcover_500m)
-M_stn$landcover_500m = fac
-fac = as.factor(M_stn$aquifer)
-M_stn$aquifer = fac
-fac = as.factor(M_stn$aq_rocktype)
-M_stn$aq_rocktype = fac
-fac = as.factor(M_stn$lith)
-M_stn$lith = fac
-fac = as.factor(M_stn$soilorder_int)
-M_stn$soilorder_int = fac
-fac = as.factor(M_stn$str_int)
-M_stn$str_int = fac
-fac = as.factor(M_stn$weg_int)
-M_stn$weg_int = fac
-fac = as.factor(M_stn$hydgrp_int)
-M_stn$hydgrp_int = fac
-fac = as.factor(M_stn$drainage_class_int)
-M_stn$drainage_class_int = fac
-fac = as.factor(M_stn$dHLR)
-M_stn$HLR = fac
-
-# save the data file out
-saveRDS(M_stn, paste0("R_Output/",folder.name,metal.code,"_RawPredictors.rds"))
-print("Covariables Extracted")
-}
-
-## Step 5. Refine the Data Frame with Data Imputation -----------------------------------------------------------------------------------------------------
-# This section fills in missing values with imputed values using a K-nearest neighbors imputation
-
-# Load Data
-master = readRDS(paste0("R_Output/",folder.name, metal.code,"_RawPredictors.rds"))
-
-# Calculate how many missing values there are per predictor
-is.missing <- function(df) {
-  missingness = matrix(ncol=3, nrow = length(names(df))) 
-  for (i in 1:length(names(df))) {
-    Var = names(df)[i]
-    missing <- sum(is.na(df[,Var]))
-    missingpct <- round(missing/ length(df[,Var]),5)
-    missingness[i,] = c(Var, missing, missingpct)
-  }
-  print(missingness)
-}
-
-missingness = as.data.frame(is.missing(master@data))
-colnames(missingness) = c(c('Variable','MissingRecords','MissingPct'))
-missingness[order(missingness$MissingPct, decreasing=TRUE),]
-
-## Remove Extra Columns
-# master<-subset(master,select=-c(conc,location.id,insideUS,TRI.As.Ct,TRI.Pb.Ct,TRI.Cd.Ct)) 
-master<-subset(master,select=-c(insideUS)) 
-
-# Set missing impacts and drainage to zero
-master$TRI.total.impact[is.na(master$TRI.total.impact)] = 0 # no missing TRI data on the map grid, so just skip this
-master$TRI.water.impact[is.na(master$TRI.water.impact)] = 0
-master$drainage[is.na(master$drainage)] = 0
-
-## Imputation 
-# Create a data frame with location information as columns
-master_locs = as.data.frame(master@data)
-master_locs$long = coordinates(master)[,1] # master$longitude [map grid coordinate is not named longitude]
-master_locs$lat = coordinates(master)[,2] # master$latitude [map grid coordinate is not named longitude]
-  
-
-# set integer values to numeric
-master_locs = master_locs %>% mutate_if(is.integer, as.numeric)
-
-# fill in missing values manually for factor variables - just create a missing category
-master_locs$KB[is.na(master_locs$KB)] = 'ms'
-
-lithlevels = levels(master_locs$lith)
-lithlevels = c(lithlevels, 'NONE')
-levels(master_locs$lith) = lithlevels
-master_locs$lith[is.na(master_locs$lith)] = 'NONE'
-
-int_predictors = c('str_int','hydgrp_int','drainage_class_int','soilorder_int','weg_int')
-for (x in int_predictors) {
-  pred_levels = levels(master_locs[[x]])
-  pred_levels = c(pred_levels, 0)
-  levels(master_locs[[x]]) = pred_levels
-  master_locs[[x]][is.na(master_locs[[x]])] = 0
-}
-
-# calculate missingness in remaining predictors
-missingness = as.data.frame(is.missing(master_locs))
-colnames(missingness) = c(c('Variable','MissingRecords','MissingPct'))
-missingness[order(missingness$MissingPct, decreasing=TRUE),]
-
-# use KNN imputation to impute missing values for numeric columns
-if (metal.code %in% c('As','Mn','Li','Sr')) { 
-  vars = names(dplyr::select(ungroup(master@data), -c('location.id','date','conc','censored.conc','censored','well.depth','data.source','ros.conc','DL.missing','TRI.total.impact','TRI.water.impact','SEMS')))
-  extra.remove = list('drainage','C_Aragon','WTDEPAMJ','C_Gypsum','WTDEP_MIN') # do not impute for parameters like > 10% missing
-  vars = setdiff(vars, extra.remove)
-} else if (metal.code == 'Cd') {
-  vars = names(dplyr::select(ungroup(master@data), -c('location.id','date','conc','censored.conc','censored','well.depth','data.source','ros.conc','DL.missing','TRI.total.impact','TRI.water.impact','SEMS')))
-  landcover_predictors = M_stn@data %>% select(contains('VALUE'), landcover_500m) %>% colnames()
-  vars = setdiff(vars,landcover_predictors) # do not impute landcover values for the 56 wells that are missing this information
-  extra.remove = list('drainage','C_Aragon','WTDEPAMJ','C_Gypsum','WTDEP_MIN') # do not impute for parameters like > 10% missing
-  vars = setdiff(vars, extra.remove)
-} else {
-  print ('error in metal code selection')
-}
-
-master_locs = VIM::kNN(master_locs, variable=vars, k=5, dist_var=c('long','lat'), impNA=FALSE) 
-master@data = master_locs 
-
-# remove the location information from the data
-master = master[,-grep('_imp',names(master))] # removes columns with the suffix "imp" which indicates whether the row was imputed or not for that column
-# master <- subset(master, select=-c(long,lat))
-
-# Save the refined data set
-saveRDS(master, paste0("R_Output/",folder.name,metal.code,"_Model_Ready.rds"))
+# vectorize across all five metals
+purrr::map(metal.codes[-c(1,2)], predictor_extract_function)

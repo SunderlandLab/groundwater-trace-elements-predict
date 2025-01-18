@@ -310,4 +310,4 @@ predictor_extract_function <- function(metal.code){
 }
 
 # vectorize across all five metals
-purrr::map(metal.codes[-c(1,2)], predictor_extract_function)
+purrr::map(metal.codes, predictor_extract_function)

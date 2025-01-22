@@ -6,9 +6,8 @@
 ########################################################################### 
 
 #### Attach Libraries and Set Working Directory ####
-packages <- c('akima','assertthat', 'chron','data.table','tidyr','tidyverse','plyr','geosphere','ggplot2', 
-              'lattice',"mice", 'NADA',"purrr", 'raster','sp', 'sf', 'stringr','terra','data.table','dplyr')
-lapply(packages, library, character.only=TRUE, warn.conflicts = FALSE)
+source(here::here('R/0_helper_fct.R'))
+
 setwd(here::here("data"))
 mapUSm <- st_read("CoVar/US48/US_48states.shp") # load projected map of the US (in m)
 

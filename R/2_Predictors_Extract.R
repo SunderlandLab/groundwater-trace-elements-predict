@@ -6,9 +6,6 @@
 # R v4.4.2
 ##################################################################################
 
-packages <- c('akima','beepr','chron','foreign','geosphere','ggplot2','gstat', 'lattice','NADA','plyr', 
-              'parallel','raster', 'readxl','sf','stringr','terra','tiff','VIM','dplyr')
-lapply(packages, library, character.only=TRUE)
 source(here::here('R/0_helper_fct.R'))
 
 setwd(here::here("data"))

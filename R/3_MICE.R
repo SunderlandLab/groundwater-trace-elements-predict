@@ -1,86 +1,196 @@
-## Step 5. Refine the Data Frame with Data Imputation -----------------------------------------------------------------------------------------------------
-# This section fills in missing values with imputed values using a K-nearest neighbors imputation
+##################################################################################
+#File name: MICE.R
+#Author: Cindy Hu
+#Date: Jan 2025
+#Purpose: MICE imputation for censored concentrations
+# R v4.4.2
+##################################################################################
 
-# Load Data
-master = readRDS(paste0("R_Output/",folder.name, metal.code,"_RawPredictors.rds"))
+source(here::here('R/0_helper_fct.R'))
 
-# Calculate how many missing values there are per predictor
-is.missing <- function(df) {
-  missingness = matrix(ncol=3, nrow = length(names(df))) 
-  for (i in 1:length(names(df))) {
-    Var = names(df)[i]
-    missing <- sum(is.na(df[,Var]))
-    missingpct <- round(missing/ length(df[,Var]),5)
-    missingness[i,] = c(Var, missing, missingpct)
+setwd(here::here("data"))
+
+#### Define Model Version ####
+metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
+metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
+names(metals) <- metal.codes
+
+impute_missing_values <- function(metal.code){
+  # Load Data
+  master <- readRDS(here::here("data/R_Output", paste0(metal.code,"_RawPredictors.rds"))) 
+  percent_missing <- data.frame(
+    column = names(master),
+    percent_missing = sapply(master, function(x) mean(is.na(x)) * 100)) %>%
+    arrange(desc(percent_missing))
+  
+  ### Step 1, missingness has meaning, set missing drainage to zero
+  master$drainage[is.na(master$drainage)] = 0
+  
+  ### Step 2, factor variables, create a missing category  
+  factor_column_names <- names(master)[sapply(master, is.factor)]
+  character_column_names <- names(master)[sapply(master, is.character)]
+  factor_column_to_fill <- percent_missing %>%
+    filter(column %in% factor_column_names | column %in% character_column_names) %>%
+    filter(percent_missing > 0) %>%
+    pull(column)
+  
+  master <- master %>%
+    mutate(across(factor_column_to_fill, ~ forcats::fct_na_value_to_level(.x, "missing")))
+  
+  ### Step 3, numeric variables, impute missing values with KNN
+  numeric_column_to_fill <- percent_missing %>%
+    filter(!(column %in% factor_column_names) & !(column %in% character_column_names)) %>%
+    filter(percent_missing > 0 & percent_missing < 10) %>%
+    pull(column) %>%
+    # do not impute conc, well.depth, DL.missing, detect.limit
+    setdiff(c('conc','well.depth', 'DL.missing', 'detect.limit'))
+  
+  master_imp <- master %>%
+    mutate(lon = st_coordinates(.)[, 1],
+           lat = st_coordinates(.)[, 2]) %>%
+    VIM::kNN(variable=numeric_column_to_fill, k=5, dist_var=c("lon", "lat"), impNA=FALSE) %>%
+    dplyr::select(-ends_with("_imp"))
+  
+  percent_missing_imp <- data.frame(
+    column = names(master_imp),
+    percent_missing = sapply(master_imp, function(x) mean(is.na(x)) * 100)) %>%
+    arrange(desc(percent_missing))
+  
+  ### Step 4, impute censored conc with MICE
+  
+  # first define censored variable when conc is NA or conc is below detect.limit
+  master_imp <- master_imp %>%
+    st_drop_geometry() %>% 
+    as.data.frame() %>%
+    dplyr::select(-"geometry") %>%
+    mutate(censored = is.na(conc) | conc == 0) 
+  
+  # if censored samples don't have detect.limit, drop the observation
+  master_imp <- master_imp %>%
+    filter(!(censored & is.na(detect.limit)))
+  
+  # We run the mice code with 0 iterations 
+  imp <- mice(master_imp, maxit=0)
+  # extractr predictorMatrix and methods of imputation
+  predM <- as_tibble(imp$predictorMatrix)
+  # specify variables not to impute
+  cols_to_zero <- percent_missing_imp %>%
+    # columns with too much missingness
+    filter(percent_missing > 10) %>%
+    pull(column) %>%
+    # these need to be imputed, so exclude them from cols_to_zero
+    setdiff(c("conc", "detect.limit"))
+  # Use mutate(across()) to set them to 0
+  predM <- predM %>%
+    mutate(across(all_of(cols_to_zero), ~ 0))
+  # If you need to convert back to a matrix
+  predM <- as.matrix(predM)
+  rownames(predM) <- colnames(master_imp)
+  colnames(predM) <- colnames(master_imp)
+  meth <- imp$method
+  meth[cols_to_zero] <- ""
+  meth["conc"] <- "conc_below_limit"  # Assign custom method
+  
+  mice.impute.conc_below_limit <- function(y, ry, x, ...) {
+    # Ensure "detect.limit" exists in x
+    if (!"detect.limit" %in% colnames(x)) {
+      stop("Error: 'detect.limit' column is missing from predictor matrix.")
+    }
+    detect_limit <- x[!ry, "detect.limit"]  # Extract detection limits for missing rows
+    
+    # Default PMM imputation
+    imputed_values <- mice.impute.pmm(y, ry, x, ...)
+    
+    # Generate random values below the detection limit
+    imputed_values <- EnvStats::rlnormTrunc(length(imputed_values), 
+                                            min = 0,  # Lower bound (assumes non-negative conc)
+                                            max = detect_limit,  # Upper bound (detection limit)
+                                            meanlog = log(imputed_values), 
+                                            sd = sd(log(y), na.rm = TRUE))  # Use observed SD
+    
+    return(imputed_values)
   }
-  print(missingness)
+  
+  # MICE imputation step
+  imp2 <- tryCatch(
+    {
+      message("Attempting MICE imputation (first try)...")
+      
+      # First attempt
+      mice(master_imp, maxit = 5, 
+           predictorMatrix = predM, 
+           method = meth, 
+           print = TRUE, 
+           seed = 123)
+    },
+    error = function(e) {
+      message("Error encountered: ", e$message)
+      message("Handling singularity: Removing near-zero variance variables and retrying MICE...")
+      
+      
+      # if failed due to singularity, try again after removing the vars with near zero variance
+      master_imp <- master_imp %>%
+        dplyr::select(-(caret::nearZeroVar(master_imp, freqCut = 999/1))) 
+      # We run the mice code with 0 iterations 
+      imp <- mice(master_imp, maxit=0)
+      # extractr predictorMatrix and methods of imputation
+      predM <- as_tibble(imp$predictorMatrix)
+      # specify variables not to impute
+      cols_to_zero <- percent_missing_imp %>%
+        # columns with too much missingness
+        filter(percent_missing > 10) %>%
+        pull(column) %>%
+        # these need to be imputed, so exclude them from cols_to_zero
+        setdiff(c("conc", "detect.limit"))
+      # Use mutate(across()) to set them to 0
+      predM <- predM %>%
+        mutate(across(all_of(cols_to_zero), ~ 0))
+      # If you need to convert back to a matrix
+      predM <- as.matrix(predM)
+      rownames(predM) <- colnames(master_imp)
+      colnames(predM) <- colnames(master_imp)
+      meth <- imp$method
+      meth[cols_to_zero] <- ""
+      meth["conc"] <- "conc_below_limit"  # Assign custom method
+      
+      message("Retrying MICE imputation (after adjustments)...")
+      
+      # second attempt
+      mice(master_imp,
+           maxit = 5, 
+           predictorMatrix = predM, 
+           method = meth, 
+           print =  TRUE, 
+           seed = 123)
+    }
+  )
+  
+  percent_missing_imp2 <- complete(imp2, "long") %>%
+    group_by(.imp) %>%
+    summarise(across(everything(), ~ mean(is.na(.x)) * 100)) %>%
+    arrange(desc(conc))
+  
+  # inspect quality of imputations
+  bind_rows(master_imp, complete(imp2, "long"))%>%
+    mutate(.imp = ifelse(is.na(.imp), "original", .imp)) %>%
+    #visualize density plot, by .imp and censored
+    ggplot(aes(x = .imp, y = conc)) +
+    geom_jitter(aes(color = censored), width = 0.25, alpha = 0.5) +
+    # log transform y axis
+    scale_y_sqrt() +
+    # rename x-axis to imputation, rename y-axis to concentration
+    labs(x = "Imputation", y = "Concentration") +
+    # add the title metal.code +
+    ggtitle(paste0("Imputation of ", metals[metal.code])) +
+    # add a horizontal line at the detection limit 5
+    geom_hline(yintercept = quantile(master_imp$detect.limit, 0.95, na.rm = TRUE), linetype = "dashed") +
+    theme_minimal(base_size = 9)
+  ggsave(paste0("R_Output/", metal.code, "_imputation_qualitycheck_plot.png"), width = 6, height = 4, dpi = 300)  
+  # save imputed data
+  saveRDS(complete(imp2, "long"), paste0("R_Output/", metal.code, "_imputed_data.rds"))
 }
 
-missingness = as.data.frame(is.missing(master@data))
-colnames(missingness) = c(c('Variable','MissingRecords','MissingPct'))
-missingness[order(missingness$MissingPct, decreasing=TRUE),]
-
-## Remove Extra Columns
-# master<-subset(master,select=-c(conc,location.id,insideUS,TRI.As.Ct,TRI.Pb.Ct,TRI.Cd.Ct)) 
-master<-subset(master,select=-c(insideUS)) 
-
-# Set missing impacts and drainage to zero
-master$TRI.total.impact[is.na(master$TRI.total.impact)] = 0 # no missing TRI data on the map grid, so just skip this
-master$TRI.water.impact[is.na(master$TRI.water.impact)] = 0
-master$drainage[is.na(master$drainage)] = 0
-
-## Imputation 
-# Create a data frame with location information as columns
-master_locs = as.data.frame(master@data)
-master_locs$long = coordinates(master)[,1] # master$longitude [map grid coordinate is not named longitude]
-master_locs$lat = coordinates(master)[,2] # master$latitude [map grid coordinate is not named longitude]
+# vectorize across all five metals
+purrr::map(metal.codes, impute_missing_values)
 
 
-# set integer values to numeric
-master_locs = master_locs %>% mutate_if(is.integer, as.numeric)
-
-# fill in missing values manually for factor variables - just create a missing category
-master_locs$KB[is.na(master_locs$KB)] = 'ms'
-
-lithlevels = levels(master_locs$lith)
-lithlevels = c(lithlevels, 'NONE')
-levels(master_locs$lith) = lithlevels
-master_locs$lith[is.na(master_locs$lith)] = 'NONE'
-
-int_predictors = c('str_int','hydgrp_int','drainage_class_int','soilorder_int','weg_int')
-for (x in int_predictors) {
-  pred_levels = levels(master_locs[[x]])
-  pred_levels = c(pred_levels, 0)
-  levels(master_locs[[x]]) = pred_levels
-  master_locs[[x]][is.na(master_locs[[x]])] = 0
-}
-
-# calculate missingness in remaining predictors
-missingness = as.data.frame(is.missing(master_locs))
-colnames(missingness) = c(c('Variable','MissingRecords','MissingPct'))
-missingness[order(missingness$MissingPct, decreasing=TRUE),]
-
-# use KNN imputation to impute missing values for numeric columns
-if (metal.code %in% c('As','Mn','Li','Sr')) { 
-  vars = names(dplyr::select(ungroup(master@data), -c('location.id','date','conc','censored.conc','censored','well.depth','data.source','ros.conc','DL.missing','TRI.total.impact','TRI.water.impact','SEMS')))
-  extra.remove = list('drainage','C_Aragon','WTDEPAMJ','C_Gypsum','WTDEP_MIN') # do not impute for parameters like > 10% missing
-  vars = setdiff(vars, extra.remove)
-} else if (metal.code == 'Cd') {
-  vars = names(dplyr::select(ungroup(master@data), -c('location.id','date','conc','censored.conc','censored','well.depth','data.source','ros.conc','DL.missing','TRI.total.impact','TRI.water.impact','SEMS')))
-  landcover_predictors = M_stn@data %>% select(contains('VALUE'), landcover_500m) %>% colnames()
-  vars = setdiff(vars,landcover_predictors) # do not impute landcover values for the 56 wells that are missing this information
-  extra.remove = list('drainage','C_Aragon','WTDEPAMJ','C_Gypsum','WTDEP_MIN') # do not impute for parameters like > 10% missing
-  vars = setdiff(vars, extra.remove)
-} else {
-  print ('error in metal code selection')
-}
-
-master_locs = VIM::kNN(master_locs, variable=vars, k=5, dist_var=c('long','lat'), impNA=FALSE) 
-master@data = master_locs 
-
-# remove the location information from the data
-master = master[,-grep('_imp',names(master))] # removes columns with the suffix "imp" which indicates whether the row was imputed or not for that column
-# master <- subset(master, select=-c(long,lat))
-
-# Save the refined data set
-saveRDS(master, paste0("R_Output/",folder.name,metal.code,"_Model_Ready.rds"))

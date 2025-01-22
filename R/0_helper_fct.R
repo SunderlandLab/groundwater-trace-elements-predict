@@ -1,3 +1,12 @@
+packages <- c(
+  "akima", "beepr", "chron", "caret", "EnvStats", "foreign", "geosphere", "ggplot2", "gstat", 
+  "lattice", "NADA", "plyr", "parallel", "raster", "readxl", "sf", "stringr", 
+  "terra", "tiff", "VIM", "dplyr", "assertthat", "data.table", "tidyr", 
+  "tidyverse", "mice", "purrr", "sp"
+)
+
+lapply(packages, library, character.only=TRUE)
+
 #### Helper functions
 
 #' Extract Raster Values at Given Point Locations

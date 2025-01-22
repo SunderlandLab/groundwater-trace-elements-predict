@@ -5,23 +5,29 @@
 #Purpose: Conduct cv/grid search and select/save best regression model
 ###########################################################################
 
-#### Attach Libraries and Set Working Directory ####
-packages <- c('beepr','plyr','dplyr','pROC','rpart','stringr','viridis','tidyverse','tidymodels','fastDummies','doParallel')
-lapply(packages, library, character.only=TRUE)
+source(here::here('R/0_helper_fct.R'))
 
-setwd('/Users/jennifer/Documents/Harvard/Drinking Water/Metals_Modeling.nosync/DWheavymetal')
+setwd(here::here("data"))
 
-#### Define Global Variables ####
-metal = 'Manganese'
-MCL = 300
-metal.code = "Mn"
-version.number = '7a'
-predictor.version = 'v1'
-folder.name = paste0(metal.code,'_',version.number,'/')
+#### Define Model Version ####
+metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
+metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
+names(metals) <- metal.codes
 
+metal.code <- metal.codes[1]
 
 ### 1a. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
-df = readRDS(paste0("R_Output/",folder.name,metal.code,"_df_PredictorsSelected_",version.number,"_",predictor.version,".rds")) # local
+df = readRDS(
+  paste0(
+    "R_Output/",
+    metal.code,
+    "_df_PredictorsSelected_",
+    version.number,
+    "_",
+    predictor.version,
+    ".rds"
+  )
+) # local
 
 # remove any rows with missing landcover data (for Cd)
 if (metal=='Cadmium') {

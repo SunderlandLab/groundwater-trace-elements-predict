@@ -15,62 +15,75 @@ metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
 metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
 names(metals) <- metal.codes
 
-impute_missing_values <- function(metal.code){
+impute_missing_values <- function(metal.code) {
   # Load Data
-  master <- readRDS(here::here("data/R_Output", paste0(metal.code,"_RawPredictors.rds"))) 
+  master <- readRDS(here::here("data/R_Output", paste0(metal.code, "_RawPredictors.rds")))
   percent_missing <- data.frame(
     column = names(master),
-    percent_missing = sapply(master, function(x) mean(is.na(x)) * 100)) %>%
+    percent_missing = sapply(master, function(x)
+      mean(is.na(x)) * 100)
+  ) %>%
     arrange(desc(percent_missing))
   
   ### Step 1, missingness has meaning, set missing drainage to zero
   master$drainage[is.na(master$drainage)] = 0
   
-  ### Step 2, factor variables, create a missing category  
+  ### Step 2, factor variables, create a missing category
   factor_column_names <- names(master)[sapply(master, is.factor)]
   character_column_names <- names(master)[sapply(master, is.character)]
   factor_column_to_fill <- percent_missing %>%
-    filter(column %in% factor_column_names | column %in% character_column_names) %>%
+    filter(column %in% factor_column_names |
+             column %in% character_column_names) %>%
     filter(percent_missing > 0) %>%
     pull(column)
   
   master <- master %>%
-    mutate(across(factor_column_to_fill, ~ forcats::fct_na_value_to_level(.x, "missing")))
+    mutate(across(
+      factor_column_to_fill,
+      ~ forcats::fct_na_value_to_level(.x, "missing")
+    ))
   
   ### Step 3, numeric variables, impute missing values with KNN
   numeric_column_to_fill <- percent_missing %>%
-    filter(!(column %in% factor_column_names) & !(column %in% character_column_names)) %>%
+    filter(!(column %in% factor_column_names) &
+             !(column %in% character_column_names)) %>%
     filter(percent_missing > 0 & percent_missing < 10) %>%
     pull(column) %>%
     # do not impute conc, well.depth, DL.missing, detect.limit
-    setdiff(c('conc','well.depth', 'DL.missing', 'detect.limit'))
+    setdiff(c('conc', 'well.depth', 'DL.missing', 'detect.limit'))
   
   master_imp <- master %>%
-    mutate(lon = st_coordinates(.)[, 1],
-           lat = st_coordinates(.)[, 2]) %>%
-    VIM::kNN(variable=numeric_column_to_fill, k=5, dist_var=c("lon", "lat"), impNA=FALSE) %>%
+    mutate(lon = st_coordinates(.)[, 1], lat = st_coordinates(.)[, 2]) %>%
+    VIM::kNN(
+      variable = numeric_column_to_fill,
+      k = 5,
+      dist_var = c("lon", "lat"),
+      impNA = FALSE
+    ) %>%
     dplyr::select(-ends_with("_imp"))
   
   percent_missing_imp <- data.frame(
     column = names(master_imp),
-    percent_missing = sapply(master_imp, function(x) mean(is.na(x)) * 100)) %>%
+    percent_missing = sapply(master_imp, function(x)
+      mean(is.na(x)) * 100)
+  ) %>%
     arrange(desc(percent_missing))
   
   ### Step 4, impute censored conc with MICE
   
   # first define censored variable when conc is NA or conc is below detect.limit
   master_imp <- master_imp %>%
-    st_drop_geometry() %>% 
+    st_drop_geometry() %>%
     as.data.frame() %>%
     dplyr::select(-"geometry") %>%
-    mutate(censored = is.na(conc) | conc == 0) 
+    mutate(censored = is.na(conc) | conc == 0)
   
   # if censored samples don't have detect.limit, drop the observation
   master_imp <- master_imp %>%
     filter(!(censored & is.na(detect.limit)))
   
-  # We run the mice code with 0 iterations 
-  imp <- mice(master_imp, maxit=0)
+  # We run the mice code with 0 iterations
+  imp <- mice(master_imp, maxit = 0)
   # extractr predictorMatrix and methods of imputation
   predM <- as_tibble(imp$predictorMatrix)
   # specify variables not to impute
@@ -102,68 +115,74 @@ impute_missing_values <- function(metal.code){
     imputed_values <- mice.impute.pmm(y, ry, x, ...)
     
     # Generate random values below the detection limit
-    imputed_values <- EnvStats::rlnormTrunc(length(imputed_values), 
-                                            min = 0,  # Lower bound (assumes non-negative conc)
-                                            max = detect_limit,  # Upper bound (detection limit)
-                                            meanlog = log(imputed_values), 
-                                            sd = sd(log(y), na.rm = TRUE))  # Use observed SD
+    imputed_values <- EnvStats::rlnormTrunc(
+      length(imputed_values),
+      min = 0,
+      # Lower bound (assumes non-negative conc)
+      max = detect_limit,
+      # Upper bound (detection limit)
+      meanlog = log(imputed_values),
+      sd = sd(log(y), na.rm = TRUE)
+    )  # Use observed SD
     
     return(imputed_values)
   }
   
   # MICE imputation step
-  imp2 <- tryCatch(
-    {
-      message("Attempting MICE imputation (first try)...")
-      
-      # First attempt
-      mice(master_imp, maxit = 5, 
-           predictorMatrix = predM, 
-           method = meth, 
-           print = TRUE, 
-           seed = 123)
-    },
-    error = function(e) {
-      message("Error encountered: ", e$message)
-      message("Handling singularity: Removing near-zero variance variables and retrying MICE...")
-      
-      
-      # if failed due to singularity, try again after removing the vars with near zero variance
-      master_imp <- master_imp %>%
-        dplyr::select(-(caret::nearZeroVar(master_imp, freqCut = 999/1))) 
-      # We run the mice code with 0 iterations 
-      imp <- mice(master_imp, maxit=0)
-      # extractr predictorMatrix and methods of imputation
-      predM <- as_tibble(imp$predictorMatrix)
-      # specify variables not to impute
-      cols_to_zero <- percent_missing_imp %>%
-        # columns with too much missingness
-        filter(percent_missing > 10) %>%
-        pull(column) %>%
-        # these need to be imputed, so exclude them from cols_to_zero
-        setdiff(c("conc", "detect.limit"))
-      # Use mutate(across()) to set them to 0
-      predM <- predM %>%
-        mutate(across(all_of(cols_to_zero), ~ 0))
-      # If you need to convert back to a matrix
-      predM <- as.matrix(predM)
-      rownames(predM) <- colnames(master_imp)
-      colnames(predM) <- colnames(master_imp)
-      meth <- imp$method
-      meth[cols_to_zero] <- ""
-      meth["conc"] <- "conc_below_limit"  # Assign custom method
-      
-      message("Retrying MICE imputation (after adjustments)...")
-      
-      # second attempt
-      mice(master_imp,
-           maxit = 5, 
-           predictorMatrix = predM, 
-           method = meth, 
-           print =  TRUE, 
-           seed = 123)
-    }
-  )
+  imp2 <- tryCatch({
+    message("Attempting MICE imputation (first try)...")
+    
+    # First attempt
+    mice(
+      master_imp,
+      maxit = 5,
+      predictorMatrix = predM,
+      method = meth,
+      print = TRUE,
+      seed = 123
+    )
+  }, error = function(e) {
+    message("Error encountered: ", e$message)
+    message("Handling singularity: Removing near-zero variance variables and retrying MICE...")
+    
+    
+    # if failed due to singularity, try again after removing the vars with near zero variance
+    master_imp <- master_imp %>%
+      dplyr::select(-(caret::nearZeroVar(master_imp, freqCut = 999 / 1)))
+    # We run the mice code with 0 iterations
+    imp <- mice(master_imp, maxit = 0)
+    # extractr predictorMatrix and methods of imputation
+    predM <- as_tibble(imp$predictorMatrix)
+    # specify variables not to impute
+    cols_to_zero <- percent_missing_imp %>%
+      # columns with too much missingness
+      filter(percent_missing > 10) %>%
+      pull(column) %>%
+      # these need to be imputed, so exclude them from cols_to_zero
+      setdiff(c("conc", "detect.limit"))
+    # Use mutate(across()) to set them to 0
+    predM <- predM %>%
+      mutate(across(all_of(cols_to_zero), ~ 0))
+    # If you need to convert back to a matrix
+    predM <- as.matrix(predM)
+    rownames(predM) <- colnames(master_imp)
+    colnames(predM) <- colnames(master_imp)
+    meth <- imp$method
+    meth[cols_to_zero] <- ""
+    meth["conc"] <- "conc_below_limit"  # Assign custom method
+    
+    message("Retrying MICE imputation (after adjustments)...")
+    
+    # second attempt
+    mice(
+      master_imp,
+      maxit = 5,
+      predictorMatrix = predM,
+      method = meth,
+      print =  TRUE,
+      seed = 123
+    )
+  })
   
   percent_missing_imp2 <- complete(imp2, "long") %>%
     group_by(.imp) %>%
@@ -171,7 +190,7 @@ impute_missing_values <- function(metal.code){
     arrange(desc(conc))
   
   # inspect quality of imputations
-  bind_rows(master_imp, complete(imp2, "long"))%>%
+  bind_rows(master_imp, complete(imp2, "long")) %>%
     mutate(.imp = ifelse(is.na(.imp), "original", .imp)) %>%
     #visualize density plot, by .imp and censored
     ggplot(aes(x = .imp, y = conc)) +
@@ -183,14 +202,25 @@ impute_missing_values <- function(metal.code){
     # add the title metal.code +
     ggtitle(paste0("Imputation of ", metals[metal.code])) +
     # add a horizontal line at the detection limit 5
-    geom_hline(yintercept = quantile(master_imp$detect.limit, 0.95, na.rm = TRUE), linetype = "dashed") +
+    geom_hline(
+      yintercept = quantile(master_imp$detect.limit, 0.95, na.rm = TRUE),
+      linetype = "dashed"
+    ) +
     theme_minimal(base_size = 9)
-  ggsave(paste0("R_Output/", metal.code, "_imputation_qualitycheck_plot.png"), width = 6, height = 4, dpi = 300)  
+  ggsave(
+    paste0(
+      "R_Output/",
+      metal.code,
+      "_imputation_qualitycheck_plot.png"
+    ),
+    width = 6,
+    height = 4,
+    dpi = 300
+  )
   # save imputed data
-  saveRDS(complete(imp2, "long"), paste0("R_Output/", metal.code, "_imputed_data.rds"))
+  saveRDS(complete(imp2, "long"),
+          paste0("R_Output/", metal.code, "_imputed_data.rds"))
 }
 
 # vectorize across all five metals
 purrr::map(metal.codes, impute_missing_values)
-
-

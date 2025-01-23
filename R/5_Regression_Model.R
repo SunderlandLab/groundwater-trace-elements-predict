@@ -16,83 +16,101 @@ names(metals) <- metal.codes
 
 metal.code <- metal.codes[1]
 
-### 1a. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
-df = readRDS(
-  paste0(
-    "R_Output/",
-    metal.code,
-    "_df_PredictorsSelected_",
-    version.number,
-    "_",
-    predictor.version,
-    ".rds"
-  )
-) # local
-
-# remove any rows with missing landcover data (for Cd)
-if (metal=='Cadmium') {
-  df = subset(df, !is.na(VALUE_0_pct))
-}
-
-df$logconc = log10(df$censored.conc) 
+### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
+df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds")) # local
+df$logconc = log10(df$conc)
 df$is.imputed = as.integer(df$censored)
 
 set.seed(123)
-df.split = rsample::initial_split(df, prop=4/5, strata=is.imputed) # stratify by whether or not the data are imputed
-df.train = rsample::training(df.split)
-df.test = rsample::testing(df.split)
+# Split data separately for each imputation
+df_splits <- df %>%
+  group_split(.imp) %>%  # Split into separate imputed datasets
+  map( ~ rsample::initial_split(.x, prop = 4 / 5, strata = is.imputed))  # Stratify by is.imputed
+
+# Extract train and test sets for each imputation
+df_train <- map(df_splits, rsample::training)
+df_test <- map(df_splits, rsample::testing)
 
 ### 2. set up model-----------------------------------------------------------------------------------------------------
-model.recipe = recipes::recipe(logconc~., data=df) %>%
-  recipes::step_rm(date, ros.conc, censored.conc, conc, DL.missing, censored,is.imputed, data.source, long, lat, location.id) %>%
-  recipes::step_rm(well.depth) %>%
-  recipes::step_zv(all_predictors()) %>% 
-  recipes::step_normalize(all_numeric_predictors()) %>% # includes numeric and integer types; this is actually standardization (mean=0, std=1) 
-  recipes::step_dummy(all_nominal_predictors()) %>%
-  recipes::prep()
+preprocess_recipe <- function(data) {
+  recipes::recipe(logconc ~ ., data = data) %>%
+    recipes::step_rm(
+      date,
+      conc,
+      DL.missing,
+      censored,
+      is.imputed,
+      data.source,
+      lon,
+      lat,
+      location.id,
+      well.depth,
+      .imp,
+      .id
+    ) %>%
+    recipes::step_zv(all_predictors()) %>%
+    recipes::step_normalize(all_numeric_predictors()) %>%
+    recipes::step_dummy(all_nominal_predictors())
+}
 
+# Apply preprocessing to each imputed dataset
+train_recipes <- map(df_train, preprocess_recipe)
 
 # with grid search parameters
-tree.model <- boost_tree(mode='regression',stop_iter=50) %>%
-  set_args(trees=tune(), tree_depth=tune(),learn_rate=tune()) %>%
+tree_model <- boost_tree(mode = 'regression', stop_iter = 50) %>%
+  set_args(trees = tune(),
+           tree_depth = tune(),
+           learn_rate = tune()) %>%
   set_engine('xgboost') %>%
   set_mode('regression')
 
 
-## compile model workflow
-model.workflow <- workflows::workflow() %>%
-  workflows::add_recipe(model.recipe) %>%
-  workflows::add_model(tree.model)
+# Compile workflow for each imputed dataset
+model_workflows <- map(
+  train_recipes,
+  ~ workflows::workflow() %>%
+    workflows::add_recipe(.x) %>%
+    workflows::add_model(tree_model)
+)
 
-### 3. conduct parameter tuning grid search with CV----------- ---------------------------------------------------------------------------
-model.cv = group_vfold_cv(df.train, folds, v=10, repeats=1)
+### 3. Conduct parameter tuning with cross-validation ------------------------------------------------------------------------------------
+# Set up cross-validation for each imputed dataset
+cv_folds <- map(df_train, ~ vfold_cv(.x, v = 10, repeats = 1))
 
-model.grid = expand.grid(trees=c(100, 150, 200), tree_depth=c(6,12,18), learn_rate=c(0.1, 0.05, 0.01)) # make sure this is even working
+# # Define parameter grid
+# model_grid <- expand.grid(trees = c(100, 200, 500), 
+#                           tree_depth = c(6, 9, 12), 
+#                           learn_rate = c(0.01, 0.03, 0.05))
 
-model.tune.results <- model.workflow %>%
-  tune::tune_grid(resamples=model.cv, grid=model.grid, metrics=yardstick::metric_set(rsq, rmse, mae))
-
-## print results
-tune.results = model.tune.results %>% collect_metrics(summmarize=TRUE) %>% print()
-tune.results.all = model.tune.results %>% collect_metrics(summarize=FALSE) %>% print()
-
-tune.results %>% subset(.metric=='rmse') %>% print(n=(dim(tune.results)[1]/3))
-tune.results %>% subset(.metric=='rsq') %>% print(n=(dim(tune.results)[1]/3))
-
-## 6. select best and simplest models from grid search -------------------------------------------------------------------------------------------------------------
-autoplot(model.tune.results) 
-tune.results = model.tune.results %>% collect_metrics(summmarize=FALSE) 
-
-# select 'best-performing' model
-model.tune.results %>% select_best(metric='rmse')
-model.tune.results %>% select_best(metric='rsq')
-
-## select all models within 1 SE of the best RMSE
-tbl_test = as.data.frame(tune.results %>% subset(.metric=='rmse' & n==10))
-best_model = tbl_test %>% filter(mean == min(mean)) # why did I not use "select_best(metrics='rmse' here? because of ties?)
-best_model
-good_models = tbl_test %>% filter(mean < (best_model$mean + best_model$std_err) & mean > (best_model$mean - best_model$std_err))
-good_models %>% arrange(trees, tree_depth, mtry, desc(learn_rate), desc(loss_reduction))
+# # Perform hyperparameter tuning for each imputation
+# tune_results <- map2(model_workflows, cv_folds, ~ tune_grid(
+#   object = .x,
+#   resamples = .y,
+#   grid = model_grid,
+#   metrics = metric_set(rsq, rmse, mae)
+# ))
+# 
+# ## print results
+# tune.results = model.tune.results %>% collect_metrics(summmarize=TRUE) %>% print()
+# tune.results.all = model.tune.results %>% collect_metrics(summarize=FALSE) %>% print()
+# 
+# tune.results %>% subset(.metric=='rmse') %>% print(n=(dim(tune.results)[1]/3))
+# tune.results %>% subset(.metric=='rsq') %>% print(n=(dim(tune.results)[1]/3))
+# 
+# ## 6. select best and simplest models from grid search -------------------------------------------------------------------------------------------------------------
+# autoplot(model.tune.results) 
+# tune.results = model.tune.results %>% collect_metrics(summmarize=FALSE) 
+# 
+# # select 'best-performing' model
+# model.tune.results %>% select_best(metric='rmse')
+# model.tune.results %>% select_best(metric='rsq')
+# 
+# ## select all models within 1 SE of the best RMSE
+# tbl_test = as.data.frame(tune.results %>% subset(.metric=='rmse' & n==10))
+# best_model = tbl_test %>% filter(mean == min(mean)) # why did I not use "select_best(metrics='rmse' here? because of ties?)
+# best_model
+# good_models = tbl_test %>% filter(mean < (best_model$mean + best_model$std_err) & mean > (best_model$mean - best_model$std_err))
+# good_models %>% arrange(trees, tree_depth, mtry, desc(learn_rate), desc(loss_reduction))
 
 ## hyperparameters for 'best selected' model from good_models (best judgement from previous step)
 df_hp <- data.frame(metals=c('As','Mn','Sr','Li','Cd'),

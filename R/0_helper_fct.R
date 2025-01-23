@@ -14,6 +14,7 @@ packages <- c(
   "parallel",
   "raster",
   "readxl",
+  "recipes",
   "sf",
   "stringr",
   "terra",
@@ -24,9 +25,11 @@ packages <- c(
   "data.table",
   "tidyr",
   "tidyverse",
+  "tidymodels",
   "mice",
   "purrr",
-  "sp"
+  "sp",
+  "xgboost"
 )
 
 lapply(packages, library, character.only = TRUE)

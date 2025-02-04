@@ -16,10 +16,7 @@ names(metals) <- metal.codes
 
 tune_xgboost_models <- function(metal.code) {
   ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
-  df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds")) %>%
-    group_by(.imp) %>%
-    sample_n(size = 500, replace = FALSE) %>%
-    ungroup()
+  df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds"))
   df$logconc = log10(df$conc)
   df$is.imputed = as.integer(df$censored)
   

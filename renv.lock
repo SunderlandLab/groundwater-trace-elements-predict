@@ -1,6 +1,6 @@
 {
   "R": {
-    "Version": "4.4.2",
+    "Version": "4.3.1",
     "Repositories": [
       {
         "Name": "CRAN",
@@ -1645,22 +1645,6 @@
         "rlang"
       ],
       "Hash": "c03fa420630029418f7e6da3667aac4a"
-    },
-    "vip": {
-      "Package": "vip",
-      "Version": "0.4.1",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "foreach",
-        "ggplot2",
-        "stats",
-        "tibble",
-        "utils",
-        "yardstick"
-      ],
-      "Hash": "4bfee1f7181f71d552a4b63485f8fc25"
     },
     "viridis": {
       "Package": "viridis",

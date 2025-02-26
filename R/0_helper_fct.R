@@ -5,6 +5,8 @@ packages <- c(
   "caret",
   "EnvStats",
   "foreign",
+  "furrr",
+  "future",
   "geosphere",
   "ggplot2",
   "gstat",
@@ -33,7 +35,6 @@ packages <- c(
 )
 
 lapply(packages, library, character.only = TRUE)
-
 #### Helper functions
 
 #' Extract Raster Values at Given Point Locations

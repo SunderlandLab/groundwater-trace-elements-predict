@@ -1,11 +1,14 @@
 ###########################################################################
 #File name:Regression_Model.R
 #Author: Jennifer Sun, Cindy Hu
-#Date: Jan 2025
+#Date: Feb 26, 2025
 #Purpose: Conduct cv/grid search and select/save best regression model
 ###########################################################################
 
 source(here::here('R/0_helper_fct.R'))
+plan(multisession, workers = future::availableCores())
+print(paste("The number of workers are", nbrOfWorkers()))
+options(future.rng.onMisuse = "ignore")
 
 setwd(here::here("data"))
 
@@ -18,9 +21,9 @@ tune_xgboost_models <- function(metal.code) {
   print(paste("Start hyperparameter tuning for", metal.code))
   ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
   df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds")) #%>%
-  # group_by(.imp) %>%
-  # sample_n(size = 100, replace = FALSE) %>%
-  # ungroup()
+    # group_by(.imp) %>%
+    # sample_n(size = 100, replace = FALSE) %>%
+    # ungroup()
   df$logconc = log10(df$conc)
   df$is.imputed = as.integer(df$censored)
   
@@ -28,11 +31,11 @@ tune_xgboost_models <- function(metal.code) {
   # Split data separately for each imputation
   df_splits <- df %>%
     group_split(.imp) %>%  # Split into separate imputed datasets
-    map( ~ rsample::initial_split(.x, prop = 4 / 5, strata = is.imputed))  # Stratify by is.imputed
+    future_map( ~ rsample::initial_split(.x, prop = 4 / 5, strata = is.imputed))  # Stratify by is.imputed
   
   # Extract train and test sets for each imputation
-  df_train <- map(df_splits, rsample::training)
-  df_test <- map(df_splits, rsample::testing)
+  df_train <- future_map(df_splits, rsample::training)
+  df_test <- future_map(df_splits, rsample::testing)
   
   ### 2. set up model-----------------------------------------------------------------------------------------------------
   preprocess_recipe <- function(data) {
@@ -58,7 +61,7 @@ tune_xgboost_models <- function(metal.code) {
   }
   
   # Apply preprocessing to each imputed dataset
-  train_recipes <- map(df_train, preprocess_recipe)
+  train_recipes <- future_map(df_train, preprocess_recipe)
   
   # with grid search parameters
   tree_model <- boost_tree(mode = 'regression', stop_iter = 50) %>%
@@ -83,7 +86,7 @@ tune_xgboost_models <- function(metal.code) {
   
   #### 3. Conduct parameter tuning with cross-validation ------------------------------------------------------------------------------------
   # Set up cross-validation for each imputed dataset
-  cv_folds <- map(df_train, ~ vfold_cv(.x, v = 10, repeats = 1))
+  cv_folds <- future_map(df_train, ~ vfold_cv(.x, v = 10, repeats = 1))
   
   # # Define parameter grid
   model_grid <- expand.grid(
@@ -96,20 +99,22 @@ tune_xgboost_models <- function(metal.code) {
   
   # Perform hyperparameter tuning for each imputation
   system.time({
-    tune_results <- map2(
+    tune_results <- future_map2(
       model_workflows,
       cv_folds,
       ~ tune_grid(
         object = .x,
         resamples = .y,
         grid = model_grid,
-        metrics = metric_set(rsq, rmse, mae)
-      )
+        metrics = metric_set(rsq, rmse, mae),
+        control = control_grid(parallel_over = "everything")
+      ),
+      seed = NULL
     )
   })
   
   # Collect tuning results for all imputations
-  all_tune_results <- map_dfr(tune_results, collect_metrics, .id = "imputation") %>%
+  all_tune_results <- future_map_dfr(tune_results, collect_metrics, .id = "imputation") %>%
     # average across five imputations to find the best hyperparameters
     group_by(.metric, .config) %>%
     summarise(
@@ -151,6 +156,7 @@ tune_xgboost_models <- function(metal.code) {
   
 }
 
+#keep this as purrr because furrr likes to error out, won't matter if we submit one metal at a time
 purrr::map(metal.codes, tune_xgboost_models)
 
 # xgboost_without_tuning <- function(i){

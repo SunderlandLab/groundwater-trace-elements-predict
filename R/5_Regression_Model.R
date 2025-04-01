@@ -135,7 +135,7 @@ tune_xgboost_models <- function(metal.code) {
               pooled_sd = sqrt(sum(mean_p_sd ^ 2) / n())) %>%
     mutate(min_plus_sd = min_val + pooled_sd)
   
-  ## 6. select best and simplest models from grid search -------------------------------------------------------------------------------------------------------------
+  ## 4. select best and simplest models from grid search -------------------------------------------------------------------------------------------------------------
   ## select all models within 1 SE of the best RMSE
   good_models <- all_tune_results %>%
     filter(.metric == 'rmse') %>%
@@ -159,81 +159,106 @@ tune_xgboost_models <- function(metal.code) {
 #keep this as purrr because furrr likes to error out, won't matter if we submit one metal at a time
 purrr::map(metal.codes, tune_xgboost_models)
 
-# xgboost_without_tuning <- function(i){
-#   # Define the XGBoost model with fixed hyperparameters
-#   xgb_spec <- boost_tree(
-#     trees = 500,           # Fixed number of trees
-#     tree_depth = 9,        # Fixed tree depth
-#     learn_rate = 0.03,     # Fixed learning rate
-#     loss_reduction = 0, # Minimum loss reduction
-#     sample_size = 0.6,     # Row sampling
-#     mtry = floor(0.6 * ncol(df_train[[i]])-1),             # Feature sampling
-#     mode = "regression"    # Change to "classification" if needed
-#   ) %>%
-#     set_engine("xgboost")
-#
-#   # Create a workflow
-#   xgb_wf <- workflow() %>%
-#     add_recipe(train_recipes[[i]]) %>%
-#     add_model(xgb_spec)
-#
-#   # Fit the model to the training data
-#   xgb_fit <- fit(xgb_wf, data = df_train[[i]])
-#
-#   # Make predictions on test data
-#   predictions <- predict(xgb_fit, df_test[[i]]) %>%
-#     bind_cols(df_test[[i]])
-#
-#   # Evaluate model performance
-#   metrics <- predictions %>%
-#     metrics(truth = logconc, estimate = .pred)
-#
-#   # Print evaluation metrics
-#   print(metrics)
-#
-#   # Plot variable importance
-#   xgb_fit %>%
-#     extract_fit_parsnip() %>%
-#     vip::vip(num_features = 10) +
-#     ggtitle(paste0("Variable Importance for ", metal.code, " Prediction, Imputation [", i, ']'))
-#
-# }
-#
-# purrr::map(1:5, xgboost_without_tuning)
-# ## hyperparameters for 'best selected' model from good_models (best judgement from previous step)
-# df_hp <- data.frame(metals=c('As','Mn','Sr','Li','Cd'),
-#                     trees=c(500, 500, 500, 100, 100),
-#                     tree_depth=c(12, 12, 9, 12, 6),
-#                     learn_rate=c(0.03, 0.01, 0.03, 0.05, 0.05),
-#                     mtry=c(0.6, 0.6, 0.6, 0.6, 0.6),
-#                     sample_size=c(0.8, 0.8, 0.6, 1.0, 0.6),
-#                     loss_reduction=c(1.0, 1.0, 0, 0.5, 5))
-# df_hp <- df_hp %>% column_to_rownames(., var='metals')
-#
-# #### 5. update model workflow -------------------------------------------------------------------------------------
-# # Update model workflow with best selected hyperparameters
-# best_model_workflow <- model_workflows[[1]] %>%
-#   update_model(
-#     boost_tree(
-#       trees = df_hp[metal.code, 'trees'],
-#       tree_depth = df_hp[metal.code, 'tree_depth'],
-#       learn_rate = df_hp[metal.code, 'learn_rate'],
-#       mtry = df_hp[metal.code, 'mtry'],
-#       sample_size = df_hp[metal.code, 'sample_size'],
-#       loss_reduction = df_hp[metal.code, 'loss_reduction'],
-#       engine = 'xgboost'
-#     )
-#   )
+# The hyperparameter tuning was run on Odyssey HPC from February 28 to March 24, 2025; each trace element took about one week.
 
-#
-# ### 6. train final models -------------------------------------------------------------------------------------------------------------
-# set.seed(123)
-# final.model = fit(best.model.workflow, df.train[df.train$is.imputed == 0, ]) # for collecting test model metrics
-# final.full.model <- fit(best.model.workflow, df[df$is.imputed==0,]) # for feature analyses and prediction
-#
-# ## local
-# filename = paste0("R_Output/",modelfolder.name,metal.code,"_ModelPackage_",version.number,"_",predictor.version,"_",model.run,'.RData')
-# save(final.model, final.full.model, df.test, df.train, model.recipe, model.workflow, file = filename) # without tuning
-#
-#
-#
+# Keep the lowest RMSE model for each metal
+get_best_model <- function(metal.code) {
+  read_csv(paste0("R_Output/", metal.code, "_df_hyperparameter.csv")) %>%
+    filter(mean_val == min(mean_val)) %>%
+    mutate(metal = metal.code)
+}
+
+df_hp <- purrr::map(metal.codes, get_best_model) %>%
+  bind_rows()
+
+#### 5. update model workflow -------------------------------------------------------------------------------------
+update_xgboost_models <- function(metal.code) {
+  print(paste("Update model workflow for", metal.code))
+  ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
+  df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds"))
+  df$logconc = log10(df$conc)
+  df$is.imputed = as.integer(df$censored)
+  
+  set.seed(123)
+  # Split data separately for each imputation
+  df_splits <- df %>%
+    group_split(.imp) %>%  # Split into separate imputed datasets
+    future_map( ~ rsample::initial_split(.x, prop = 4 / 5, strata = is.imputed))  # Stratify by is.imputed
+  
+  # Extract train and test sets for each imputation
+  df_train <- future_map(df_splits, rsample::training)
+  df_test <- future_map(df_splits, rsample::testing)
+  
+  ### 2. set up model-----------------------------------------------------------------------------------------------------
+  preprocess_recipe <- function(data) {
+    recipes::recipe(logconc ~ ., data = data) %>%
+      recipes::step_rm(
+        date,
+        conc,
+        DL.missing,
+        detect.limit,
+        censored,
+        is.imputed,
+        data.source,
+        lon,
+        lat,
+        location.id,
+        well.depth,
+        .imp,
+        .id
+      ) %>%
+      recipes::step_zv(all_predictors()) %>%
+      recipes::step_normalize(all_numeric_predictors()) %>%
+      recipes::step_dummy(all_nominal_predictors())
+  }
+  
+  # Apply preprocessing to each imputed dataset
+  train_recipes <- future_map(df_train, preprocess_recipe)
+  
+  # with grid search parameters
+  tree_model <- boost_tree(mode = 'regression', stop_iter = 50) %>%
+    set_args(
+      trees = tune(),
+      tree_depth = tune(),
+      learn_rate = tune(),
+      sample_size = tune(),
+      loss_reduction = tune()
+    ) %>%
+    set_engine('xgboost') %>%
+    parsnip::set_mode('regression')
+  
+  
+  # Compile workflow for each imputed dataset
+  model_workflows <- map(
+    train_recipes,
+    ~ workflows::workflow() %>%
+      workflows::add_recipe(.x) %>%
+      workflows::add_model(tree_model)
+  )
+  
+  # Get the names of valid arguments for boost_tree()
+  valid_args <- names(formals(boost_tree))
+  
+  # Subset only valid columns
+  params <- df_hp %>% filter(metal == metal.code) %>%
+    select(intersect(names(df_hp), valid_args)) %>%
+    as.list()
+  # Update model workflow with best selected hyperparameters
+  best_model_workflow <-  purrr::map(
+    model_workflows,
+    ~ update_model(.x, do.call(boost_tree, c(params, list(mode = "regression", engine = "xgboost"))))
+  )
+
+
+  ### 6. train final models -------------------------------------------------------------------------------------------------------------
+  set.seed(123)
+  final_model <- map2(best_model_workflow, df_train, fit) # for collecting test model metrics
+  final_full_model <- map2(best_model_workflow, df %>%group_split(.imp), fit) # for feature analyses and prediction
+
+  filename <- paste0("R_Output/", metal.code,"_ModelPackage.RData")
+  save(final_model, final_full_model, df_test, df_train, train_recipes, model_workflows, file = filename) 
+  print(paste("Model package for", metal.code, "saved"))
+}
+
+# iterate over five trace elements and save model packages
+purrr::map(metal.codes, update_xgboost_models)

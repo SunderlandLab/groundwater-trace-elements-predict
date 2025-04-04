@@ -1,132 +1,37 @@
 ###########################################################################
 #File name: Shapley_Analysis.R
-#Author: Jennifer Sun
-#Date: April 2023
+#Author: Jennifer Sun, Cindy Hu
+#Date: April 2023, March 2025
 #Purpose: Analyze shapley values
 ###########################################################################
 
 #### Attach Libraries and Set Working Directory ####
-packages <- c('dplyr','plyr','ggplot2','ranger','pdp','tidyverse','tidymodels','RColorBrewer','treeshap','shapviz','xgboost',
-              'factoextra','vip','rgdal','raster','beepr', 'sf')
-lapply(packages, library, character.only=TRUE)
+source(here::here('R/0_helper_fct.R'))
+plan(multisession, workers = future::availableCores())
+print(paste("The number of workers are", nbrOfWorkers()))
+options(future.rng.onMisuse = "ignore")
 
+setwd(here::here("data"))
+
+#### Define Model Version ####
+metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
+metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
+names(metals) <- metal.codes
+
+#### read in auxilary geospatial data for regional shapley value 
 mapUSm <- read_sf(dsn="CoVar/US48", layer="US_48states") # load projected map of the US (in m)
-US.df = fortify(mapUSm)
-aquifershp = read_sf(dsn="CoVar/aquifrp025_nt00003", layer="aquifrp025")
-
-setwd('/Users/jennifer/Documents/Harvard/Drinking Water/Metals_Modeling.nosync/DWheavymetal')
-
-### Read in full data package
-metal = 'Arsenic'
-metal.code = 'As'
-version.number = '7a' # 5a
-predictor.version = 'v1'
-grid.version = 'tune8_std'
-treetype = 'xgboost'
-model.run = 'xgboost_tune8_std_simple' # RFreg_withDLsonly, TwoPartReg_rev1
-cluster.folder = 'tune8_std_SHAP'
-folder.name = paste0(metal.code,'_',version.number,'/')
-modelfolder.name = paste0(metal.code,'_',version.number,'/',grid.version,'/')
-
-# read in final model
-filename = paste0("R_Output/",modelfolder.name,metal.code,"_ModelPackage_",version.number,"_",predictor.version,"_",model.run,'.RData')
-load(filename)
-
-# function to calculate the mean of the absolute value of the shap values to plot as a bar plot 
-calc.meanabs.SHAP = function(shap) {
-  shap.absmean = as.data.frame(shap$S) %>%
-    summarise_all(~mean(abs(.))) %>% 
-    t() %>% as.data.frame()
-  colnames(shap.absmean) = 'SHAP'
-  shap.absmean$predictor = rownames(shap.absmean)
-  shap.absmean = shap.absmean[order(shap.absmean$SHAP),]
-  
-  varImp = tail(shap.absmean,10)$predictor
-  return(varImp)
-  
-}
-
-#### 1. Prepare data --------------------------------------------------------------------------------------------------------
-## extract xgboost object
-final.xg = extract_fit_engine(final.full.model) 
-
-## extract full processed dataframe (i.e. after one-hot encoding)
-df = rbind(df.train, df.test)
-
-df.pred = bake( 
-  prep(model.recipe),
-  has_role('predictor'),
-  new_data = df,
-  composition = 'matrix'
-)
-
-## extract lists of columns associated with each factor
-factors = df %>% dplyr::select(-c('location.id','data.source')) %>% dplyr::select_if(is.factor) %>% colnames() # extract factor names
-
-factorcols = list()
-for (factor in factors) {
-  cols = as.data.frame(df.pred) %>% dplyr::select(starts_with(factor)) %>% colnames()
-  factorcols = append(factorcols, list(cols))
-}
-names(factorcols) = factors # assign factor names to lists of columns
-
-## update df.pred to match features used in the model if needed
-df.pred.features = as.data.frame(colnames(df.pred))
-model.features = as.data.frame(final.xg$feature_names)
-colnames(df.pred.features) = 'features'
-colnames(model.features) = 'features'
-remove_features = setdiff(df.pred.features, model.features)
-remove_features
-remove_index = which(colnames(df.pred) %in% remove_features$features)
-remove_index
-
-df.pred = df.pred[, -remove_index]
+US.df <- fortify(mapUSm)
+aquifershp <- read_sf(dsn="CoVar/aquifrp025_nt00003", layer="aquifrp025") %>% st_set_crs(4269)  
+# CRS info comes from meta data https://catalog.data.gov/dataset/aquifers1
+# https://catalog.data.gov/harvest/object/a92b0a2a-2a5e-4709-879d-e78666d4c471
+pennsylvanian_aquifers <- aquifershp %>% filter(AQ_NAME == "Pennsylvanian aquifers") %>%
+  select(geometry) 
+mississippi_river_valley_aquifers <- aquifershp %>% filter(str_detect(AQ_NAME, "Mississippi River Valley"))%>%
+  select(geometry) 
 
 
-#### 2a. Calculate xgboost shapley values for FULL dataset --------------------------------------------------------------------------------------------------------
-shap <- shapviz(final.xg, X_pred = df.pred, X = df, collapse=factorcols)  # X_pred should be compatible with and the same length (rows) as final.xg; X should match visualization columns
-shap.predictors = calc.meanabs.SHAP(shap)
-
-fig = sv_importance(shap, kind = "both", show_numbers = TRUE) 
-
-
-#### 2b. Calculate regional shapley for Manganese (example) --------------------------------------------------------
-
-# add other boundaries to identify wells within regions using the original model data
-df.shp = rbind(df.test, df.train)
-df.shp$longitude = df.shp$long
-df.shp$latitude = df.shp$lat # create duplicate lat/longs to turn dataframe into shapefile; original lat/long retained for model recipe baking
-coordinates(df.shp) = c("longitude","latitude") # coordinates: rgdal
-proj4string(df.shp) <- crs(mapUSm) # crs: raster
-df.shp = st_as_sf(df.shp)
-
-# join to aquifers
-st_crs(aquifershp) <- crs(df.shp)
-df.shp <- as_Spatial(df.shp) # convert back to sp
-df.shp$aquiferID <- unlist(over(df.shp, aquifershp[,c('OBJECTID')])) # extract to points in sp, not sure why st_join is returning an error
-df.shp = st_as_sf(df.shp)
-
-# select regions (convert this into an 'if' set of statements and choose region above..)
-df.subset = subset(df.shp, aquifer == 310) # Pennsylvanian aquifers (but this is multiple, not just the one)
-# df.subset = subset(df.subset, aquiferID == 1537) # Jennifer to double check this aquifer location
-
-df.subset.pred = bake( # processed dataset (i.e. after one-hot-encoding)
-  prep(model.recipe),
-  has_role('predictor'), 
-  new_data = df.subset,
-  composition = 'matrix'
-)
-
-shap.sub <- shapviz(final.xg, X_pred = df.subset.pred, X=df.subset, collapse=factorcols)  # if you're not explaining a subset, don't need to pass a subset?
-shap.predictors = calc.meanabs.SHAP(shap.sub)
-
-fig = sv_importance(shap.sub, kind = "both", show_numbers = TRUE) # kind = 'beeswarm','both','bar(??)'
-
-
-#### 3. Relabel shapley figures ----------------------------------------------------------------------------------------------------------------
-
-## rename features 
-relabels = c('ph' = 'pH',
+#### rename features 
+relabels <- c('ph_2550' = 'pH',
              'SLOPE'='slope',
              'KB'='bedrock',
              'rech'='recharge',
@@ -171,9 +76,136 @@ relabels = c('ph' = 'pH',
              'C_K' = 'Potassium, C horizon',
              'VALUE_42_pct' = '% Evergreen Forest')
 
-predictors2plot = tail(shap.predictors, 10) # just choose top 10 predictors to display
-varImp.plot <- fig + 
-      scale_y_discrete(limits=predictors2plot, labels=relabels) +  
-      theme_classic() + 
-      theme(axis.text.x = element_text(size=12), axis.text.y=element_text(size=12))  
-varImp.plot
+run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
+  print(paste("Begin shapley analysis for", metal.code))
+  filename <- paste0('R_Output/', metal.code,"_ModelPackage.RData")
+  load(filename)
+  
+  #### 1. Prepare data --------------------------------------------------------------------------------------------------------
+  ## extract xgboost object
+  final_xg_list <- map(final_full_model, extract_fit_engine) 
+  # Initialize output lists
+  df_pred_list <- list()
+  factorcols_list <- list()
+  
+  # Loop over imputed datasets
+  for (i in seq_along(df_train)) {
+    df <- rbind(df_train[[i]], df_test[[i]])  # Combine train and test for this imputed set
+    
+    # Process predictors using recipe
+    df_pred <- bake(
+      prep(train_recipes[[1]]), # bake with the reference recipe to ensure consistency
+      has_role('predictor'),
+      new_data = df,
+      composition = 'matrix'
+    )
+    
+    # Extract factor names
+    factors <- df %>%
+      dplyr::select(-c('location.id', 'data.source')) %>%
+      dplyr::select_if(is.factor) %>%
+      colnames()
+    
+    # Extract factor-related columns
+    factorcols <- list()
+    for (factor in factors) {
+      cols <- as.data.frame(df_pred) %>%
+        dplyr::select(starts_with(factor)) %>%
+        colnames()
+      factorcols[[factor]] <- cols
+    }
+    
+    # Align df_pred with model features
+    remove_features <- c(setdiff(colnames(df_pred), final_xg_list[[i]]$feature_names))
+    remove_index <- which(colnames(df_pred) %in% remove_features)
+    if (length(remove_index) > 0) {
+      df_pred <- df_pred[, -remove_index]
+    }
+    
+    # Save results
+    df_pred_list[[i]] <- df_pred
+    factorcols_list[[i]] <- factorcols
+  }
+  
+  #### 2a. Calculate xgboost shapley values --------------------------------------------------------------------------------------------------------
+  if(is.null(region_shapefile)){
+    # national analysis, use 10000 sample
+    shap_list <- map(seq_along(df_train), function(i) {
+      print(i)
+      df <- rbind(df_train[[i]], df_test[[i]])
+      df_pred <- df_pred_list[[i]]
+      factorcols <- factorcols_list[[i]]
+      
+      # set.seed(123)
+      # sample_rows <- sample(1:nrow(df), size = 10000)
+      # 
+      shapviz(
+        object = final_xg_list[[i]],
+        X_pred = df_pred,
+        X = df,
+        collapse = factorcols
+      )
+    })
+
+  }else{
+    # regional analysis, filter by aquifer shapefile
+      shap_list <- map(seq_along(df_train), function(i) {
+        df_pred <- df_pred_list[[i]]
+        df_region <- rbind(df_train[[i]], df_test[[i]]) %>%
+          mutate(row_id = row_number()) %>%
+          st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE) %>%
+          st_transform(st_crs(region_shapefile)) %>%
+          st_join(region_shapefile, join = st_within, left = FALSE)  %>%# inner join
+          st_drop_geometry() 
+        
+        matched_idx <- df_region$row_id #keep the index to filter the df_pred_list
+        df_region <- df_region %>% dplyr::select(-c('row_id')) #df_region must have the same number of columns as df
+        factorcols <- factorcols_list[[i]]
+        
+        shapviz(
+          object = final_xg_list[[i]],
+          X_pred = df_pred[matched_idx, ],
+          X = df_region,
+          collapse = factorcols
+        )
+    })
+  }
+  saveRDS(shap_list, paste0('R_Output/', metal.code, "_", deparse(substitute(region_shapefile)), '_shap_list.rds'))
+}
+
+# 5 national shapley value analyses
+purrr::map(metal.codes[2], ~run_shapley_analysis(.x, region_shapefile = NULL))
+# 2 regional shapley value analyses
+run_shapley_analysis(metal.code = "Mn", region_shapefile = pennsylvanian_aquifers)
+run_shapley_analysis(metal.code = "Mn", region_shapefile = mississippi_river_valley_aquifers)
+
+visualize_shapley_analysis <- function(shap_list_name){
+  shap_list <- readRDS(paste0('R_Output/', shap_list_name, '_shap_list.rds'))
+  # 1. Extract SHAP matrices
+  shap_matrices <- lapply(shap_list, function(sv) sv$S)
+  # 2. Pool SHAP values by averaging across imputations
+  pooled_S <- Reduce(`+`, shap_matrices) / length(shap_matrices)
+  # 3. Pool baseline values
+  baseline_values <- sapply(shap_list, function(sv) sv$baseline)
+  pooled_baseline <- mean(baseline_values)
+  # 4. Use the feature matrix from the first object
+  X_ref <- shap_list[[1]]$X
+  # 5. Reconstruct a new shapviz object
+  shap_pooled <- shapviz(
+    pooled_S,
+    X = X_ref,
+    baseline_value = pooled_baseline,
+    model_class = "xgboost"
+  )
+  varImp.plot <- sv_importance(shap_pooled, kind = "both", show_numbers = TRUE) + 
+    scale_y_discrete(limits=rev(calc_meanabs_shap(shap_pooled)), labels=relabels) +  
+    theme_classic() + 
+    theme(axis.text.x = element_text(size=12), axis.text.y=element_text(size=12))  
+  ggsave(varImp.plot, filename = paste0('R_Output/', shap_list_name, '_SHAP_varImp_plot.png'), width = 6, height = 5)
+}
+
+# visualize 5 national shapley values
+purrr::map(paste0(metal.codes[2], "_NULL"), visualize_shapley_analysis)
+# visualize 2 regional shapley values
+visualize_shapley_analysis("Mn_pennsylvanian_aquifers")
+visualize_shapley_analysis("Mn_mississippi_river_valley_aquifers")

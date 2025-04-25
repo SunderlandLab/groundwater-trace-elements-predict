@@ -18,7 +18,7 @@ setwd(here::here("data"))
 metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
 metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
 names(metals) <- metal.codes
-MCLs <- c(10, 5, 60, 50, 4000)
+MCLs <- c(10, 5, 60, 300, 4000)
 names(MCLs) <- metal.codes
 
 evaluate_and_predict <- function(metal.code){
@@ -34,7 +34,7 @@ evaluate_and_predict <- function(metal.code){
     ~ predict(..1, ..2) %>%
       bind_cols(..2) %>%
       mutate(
-        logconc = log10(conc),
+        logconc = log10(conc+0.001),
         antilog_pred = 10^.pred
       )
   )
@@ -48,7 +48,7 @@ evaluate_and_predict <- function(metal.code){
     ~ predict(..1, ..2) %>%
       bind_cols(..2) %>%
       mutate(
-        logconc = log10(conc),
+        logconc = log10(conc+0.001),
         antilog_pred = 10^.pred
       )
   )

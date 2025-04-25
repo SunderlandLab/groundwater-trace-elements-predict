@@ -15,7 +15,7 @@ mapUSm <- st_read("CoVar/US48/US_48states.shp") # load projected map of the US (
 metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
 metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
 names(metals) <- metal.codes
-MCLs <- c(10, 5, 60, 50, 4000)
+MCLs <- c(10, 5, 60, 300, 4000)
 names(MCLs) <- metal.codes
 
 ## MCL Values ----

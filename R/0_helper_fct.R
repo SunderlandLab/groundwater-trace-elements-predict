@@ -9,6 +9,7 @@ packages <- c(
   "future",
   "geosphere",
   "ggplot2",
+  "ggpmisc",
   "gstat",
   "lattice",
   "NADA",

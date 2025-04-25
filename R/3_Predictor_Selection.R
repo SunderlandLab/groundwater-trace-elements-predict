@@ -17,7 +17,7 @@ names(metals) <- metal.codes
 select_predictors <- function(metal.code) {
   print(paste0('Begin variable selection for ', metal.code))
   # Read the refined data set
-  df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds"))
+  df <- readRDS(paste0("R_Output/", metal.code, "_RawPredictors.rds"))
   percent_missing <- data.frame(column = names(df),
                                 percent_missing = sapply(df, function(x)
                                   mean(is.na(x)) * 100)) %>%
@@ -145,7 +145,7 @@ select_predictors <- function(metal.code) {
   
   # Save final dataframe
   saveRDS(df,
-          paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds"))
+          paste0("Data_Files/", metal.code, "_df_PredictorsSelected.rds"))
   print(paste0('Variable selection for ', metal.code, ' complete'))
 }
 

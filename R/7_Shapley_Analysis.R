@@ -82,19 +82,19 @@ run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
   load(filename)
   
   #### 1. Prepare data --------------------------------------------------------------------------------------------------------
-  ## extract xgboost object
-  final_xg_list <- map(final_full_model, extract_fit_engine) 
+  ## extract xgboost object from model trained on training data, for diagnostics
+  final_xg_list <- map(final_model, extract_fit_engine) 
   # Initialize output lists
   df_pred_list <- list()
   factorcols_list <- list()
   
   # Loop over imputed datasets
   for (i in seq_along(df_train)) {
-    df <- rbind(df_train[[i]], df_test[[i]])  # Combine train and test for this imputed set
+    df <- rbind(df_train[[i]], df_test[[i]])  
     
     # Process predictors using recipe
     df_pred <- bake(
-      prep(train_recipes[[1]]), # bake with the reference recipe to ensure consistency
+      prep(train_recipes[[i]]), # bake with the reference recipe to ensure consistency
       has_role('predictor'),
       new_data = df,
       composition = 'matrix'
@@ -117,6 +117,7 @@ run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
     
     # Align df_pred with model features
     remove_features <- c(setdiff(colnames(df_pred), final_xg_list[[i]]$feature_names))
+    print(paste0("features to remove from df_pred are ", remove_features))
     remove_index <- which(colnames(df_pred) %in% remove_features)
     if (length(remove_index) > 0) {
       df_pred <- df_pred[, -remove_index]
@@ -129,16 +130,13 @@ run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
   
   #### 2a. Calculate xgboost shapley values --------------------------------------------------------------------------------------------------------
   if(is.null(region_shapefile)){
-    # national analysis, use 10000 sample
+    # national analysis
     shap_list <- map(seq_along(df_train), function(i) {
       print(i)
-      df <- rbind(df_train[[i]], df_test[[i]])
-      df_pred <- df_pred_list[[i]]
+      df <- rbind(df_train[[i]], df_test[[i]]) 
+      df_pred <- df_pred_list[[i]] 
       factorcols <- factorcols_list[[i]]
-      
-      # set.seed(123)
-      # sample_rows <- sample(1:nrow(df), size = 10000)
-      # 
+
       shapviz(
         object = final_xg_list[[i]],
         X_pred = df_pred,
@@ -184,7 +182,14 @@ visualize_shapley_analysis <- function(shap_list_name){
   # 1. Extract SHAP matrices
   shap_matrices <- lapply(shap_list, function(sv) sv$S)
   # 2. Pool SHAP values by averaging across imputations
-  pooled_S <- Reduce(`+`, shap_matrices) / length(shap_matrices)
+  # Find common column names
+  common_cols <- Reduce(intersect, lapply(shap_matrices, colnames))
+  
+  # Subset each matrix to only those common columns
+  shap_matrices_common <- lapply(shap_matrices, function(mat) mat[, common_cols, drop = FALSE])
+  
+  # Average them
+  pooled_S <- Reduce(`+`, shap_matrices_common) / length(shap_matrices_common)
   # 3. Pool baseline values
   baseline_values <- sapply(shap_list, function(sv) sv$baseline)
   pooled_baseline <- mean(baseline_values)

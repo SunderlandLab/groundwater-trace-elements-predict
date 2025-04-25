@@ -14,10 +14,24 @@ setwd(here::here("data"))
 metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
 metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
 names(metals) <- metal.codes
+MCLs <- c(10, 5, 60, 300, 4000)
+names(MCLs) <- metal.codes
 
 impute_missing_values <- function(metal.code) {
   # Load Data
-  master <- readRDS(here::here("data/R_Output", paste0(metal.code, "_RawPredictors.rds")))
+  master <- readRDS(paste0("Data_Files/", metal.code, "_df_PredictorsSelected.rds")) %>%
+    select(-c(censored.conc, ros.conc)) %>%
+    # make aquifer a factor variable
+    mutate(aquifer = as.factor(aquifer))
+  if(!"detect.limit"%in%colnames(master)){
+    # bring back limit of detection
+    sup_master <- readRDS(paste0("R_Output/", metal.code, "_RawPredictors.rds")) %>%
+      st_drop_geometry() %>%
+      dplyr::select(location.id, detect.limit)
+    master <- master %>%
+      left_join(sup_master, by = "location.id")
+  }
+  
   percent_missing <- data.frame(
     column = names(master),
     percent_missing = sapply(master, function(x)
@@ -47,13 +61,14 @@ impute_missing_values <- function(metal.code) {
   numeric_column_to_fill <- percent_missing %>%
     filter(!(column %in% factor_column_names) &
              !(column %in% character_column_names)) %>%
-    filter(percent_missing > 0 & percent_missing < 10) %>%
+    filter(percent_missing > 0) %>%
     pull(column) %>%
-    # do not impute conc, well.depth, DL.missing, detect.limit
-    setdiff(c('conc', 'well.depth', 'DL.missing', 'detect.limit'))
+    # do not impute conc, well.depth
+    setdiff(c('conc', 'well.depth'))
   
-  master_imp <- master %>%
-    mutate(lon = st_coordinates(.)[, 1], lat = st_coordinates(.)[, 2]) %>%
+  if(length(numeric_column_to_fill)>0){
+    master_imp <- master %>%
+    rename(lon = long) %>%
     VIM::kNN(
       variable = numeric_column_to_fill,
       k = 5,
@@ -68,20 +83,22 @@ impute_missing_values <- function(metal.code) {
       mean(is.na(x)) * 100)
   ) %>%
     arrange(desc(percent_missing))
+  } else{
+    master_imp <- master
+  }
   
   ### Step 4, impute censored conc with MICE
-  
-  # first define censored variable when conc is NA or conc is below detect.limit
-  master_imp <- master_imp %>%
-    st_drop_geometry() %>%
-    as.data.frame() %>%
-    dplyr::select(-"geometry") %>%
-    mutate(censored = is.na(conc) | conc == 0)
   
   # if censored samples don't have detect.limit, drop the observation
   master_imp <- master_imp %>%
     filter(!(censored & is.na(detect.limit)))
   
+  if(nrow(master_imp)<nrow(master)){
+    print("pause to check sample size in imputation input.")
+  }
+  
+  print(paste("percent censored is ",
+              round(sum(master_imp$censored) / nrow(master_imp) * 100, 2)))
   # We run the mice code with 0 iterations
   imp <- mice(master_imp, maxit = 0)
   # extractr predictorMatrix and methods of imputation
@@ -92,7 +109,7 @@ impute_missing_values <- function(metal.code) {
     filter(percent_missing > 10) %>%
     pull(column) %>%
     # these need to be imputed, so exclude them from cols_to_zero
-    setdiff(c("conc", "detect.limit"))
+    setdiff(c("conc"))
   # Use mutate(across()) to set them to 0
   predM <- predM %>%
     mutate(across(all_of(cols_to_zero), ~ 0))
@@ -117,7 +134,7 @@ impute_missing_values <- function(metal.code) {
     # Generate random values below the detection limit
     imputed_values <- EnvStats::rlnormTrunc(
       length(imputed_values),
-      min = 0,
+      min = 0.001,
       # Lower bound (assumes non-negative conc)
       max = detect_limit,
       # Upper bound (detection limit)
@@ -207,6 +224,7 @@ impute_missing_values <- function(metal.code) {
       linetype = "dashed"
     ) +
     theme_minimal(base_size = 9)
+  
   ggsave(
     paste0(
       "R_Output/",
@@ -224,3 +242,24 @@ impute_missing_values <- function(metal.code) {
 
 # vectorize across all five metals
 purrr::map(metal.codes, impute_missing_values)
+
+# Create Table 1
+# read in imputated data, compute summary statistcs, such as number of wells, percent not censorsored, concentration 
+# min 25th percentile, median, 75th percentile, and max
+# % above MCL
+imputed_data <- purrr::map_dfr(metal.codes, ~ readRDS(paste0("R_Output/", .x, "_imputed_data.rds")), .id = "metal") %>%
+  mutate(metal = metal.codes[as.integer(metal)]) %>%
+  group_by(metal) %>%
+  summarise(
+    n_wells = n_distinct(location.id),
+    n_samples = n(),
+    percent_not_censored = sum(!censored) / n() * 100,
+    conc_min = min(conc, na.rm = TRUE),
+    conc_25th = quantile(conc, 0.25, na.rm = TRUE),
+    conc_median = median(conc, na.rm = TRUE),
+    conc_75th = quantile(conc, 0.75, na.rm = TRUE),
+    conc_max = max(conc, na.rm = TRUE),
+    percent_above_MCL = sum(conc > MCLs[metal]) / n() * 100
+  )
+# save table 1
+write.csv(imputed_data, "R_Output/Table1_imputed_data_summary.csv", row.names = FALSE)

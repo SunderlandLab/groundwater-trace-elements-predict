@@ -20,12 +20,9 @@ names(metals) <- metal.codes
 tune_xgboost_models <- function(metal.code) {
   print(paste("Start hyperparameter tuning for", metal.code))
   ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
-  df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds")) #%>%
-    # group_by(.imp) %>%
-    # sample_n(size = 100, replace = FALSE) %>%
-    # ungroup()
-  df$logconc = log10(df$conc)
-  df$is.imputed = as.integer(df$censored)
+  df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
+    mutate(logconc = log10(conc+0.001),
+         is.imputed = as.integer(censored)) 
   
   set.seed(123)
   # Split data separately for each imputation
@@ -72,7 +69,7 @@ tune_xgboost_models <- function(metal.code) {
       sample_size = tune(),
       loss_reduction = tune()
     ) %>%
-    set_engine('xgboost') %>%
+    set_engine('xgboost', counts = FALSE) %>%
     parsnip::set_mode('regression')
   
   
@@ -157,14 +154,15 @@ tune_xgboost_models <- function(metal.code) {
 }
 
 #keep this as purrr because furrr likes to error out, won't matter if we submit one metal at a time
-purrr::map(metal.codes, tune_xgboost_models)
-
+# purrr::map(metal.codes, tune_xgboost_models)
 # The hyperparameter tuning was run on Odyssey HPC from February 28 to March 24, 2025; each trace element took about one week.
 
 # Keep the lowest RMSE model for each metal
 get_best_model <- function(metal.code) {
   read_csv(paste0("R_Output/", metal.code, "_df_hyperparameter.csv")) %>%
-    filter(mean_val == min(mean_val)) %>%
+    # filter mean_val is closest to min_plus_sd
+    filter(mean_val < min_plus_sd[1]) %>%
+    slice_max(mean_val, n = 1) %>%
     mutate(metal = metal.code)
 }
 
@@ -175,9 +173,10 @@ df_hp <- purrr::map(metal.codes, get_best_model) %>%
 update_xgboost_models <- function(metal.code) {
   print(paste("Update model workflow for", metal.code))
   ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
-  df <- readRDS(paste0("R_Output/", metal.code, "_df_PredictorsSelected.rds"))
-  df$logconc = log10(df$conc)
-  df$is.imputed = as.integer(df$censored)
+  df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
+    mutate(logconc = log10(conc+0.001),
+           is.imputed = as.integer(censored)) %>%
+    filter(!is.infinite(logconc))
   
   set.seed(123)
   # Split data separately for each imputation
@@ -224,7 +223,7 @@ update_xgboost_models <- function(metal.code) {
       sample_size = tune(),
       loss_reduction = tune()
     ) %>%
-    set_engine('xgboost') %>%
+    set_engine('xgboost', counts = FALSE) %>%
     parsnip::set_mode('regression')
   
   
@@ -261,4 +260,4 @@ update_xgboost_models <- function(metal.code) {
 }
 
 # iterate over five trace elements and save model packages
-purrr::map(metal.codes, update_xgboost_models)
+purrr::map(metal.codes[2], update_xgboost_models)

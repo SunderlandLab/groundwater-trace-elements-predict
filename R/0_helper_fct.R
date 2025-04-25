@@ -18,6 +18,7 @@ packages <- c(
   "raster",
   "readxl",
   "recipes",
+  "randomForest",
   "sf",
   "shapviz",
   "SHAPforxgboost",

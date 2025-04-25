@@ -53,7 +53,7 @@ impute_missing_values <- function(metal.code) {
   
   master <- master %>%
     mutate(across(
-      factor_column_to_fill,
+     all_of(factor_column_to_fill),
       ~ forcats::fct_na_value_to_level(.x, "missing")
     ))
   
@@ -90,8 +90,8 @@ impute_missing_values <- function(metal.code) {
   ### Step 4, impute censored conc with MICE
   
   # if censored samples don't have detect.limit, drop the observation
-  master_imp <- master_imp %>%
-    filter(!(censored & is.na(detect.limit)))
+  master_imp <- master_imp %>% filter(!(censored & is.na(detect.limit)))
+  master_imp$conc[master_imp$censored] <- NA
   
   if(nrow(master_imp)<nrow(master)){
     print("pause to check sample size in imputation input.")
@@ -102,7 +102,17 @@ impute_missing_values <- function(metal.code) {
   # We run the mice code with 0 iterations
   imp <- mice(master_imp, maxit = 0)
   # extractr predictorMatrix and methods of imputation
-  predM <- as_tibble(imp$predictorMatrix)
+  #predM <- as_tibble(imp$predictorMatrix)
+  predM <- matrix(0, ncol = ncol(master_imp), nrow = ncol(master_imp),
+                  dimnames = list(names(master_imp), names(master_imp)))
+  # Impute conc using only a curated subset of predictors
+  important_predictors <- c("SEMS", "TRI.water.impact", "C_Cd", "C_Pb", "HLR", "no3_pub", 
+                            "C_Calcite", "C_Ca", "om_kg_sq_m", 'VALUE_21_pct', "detect.limit")
+  missing_vars <- setdiff(important_predictors, names(master_imp))
+  if (length(missing_vars) > 0) {
+    stop(paste("Important predictors missing from master_imp:", paste(missing_vars, collapse = ", ")))
+  }
+  predM["conc", important_predictors] <- 1
   # specify variables not to impute
   cols_to_zero <- percent_missing_imp %>%
     # columns with too much missingness
@@ -111,7 +121,7 @@ impute_missing_values <- function(metal.code) {
     # these need to be imputed, so exclude them from cols_to_zero
     setdiff(c("conc"))
   # Use mutate(across()) to set them to 0
-  predM <- predM %>%
+  predM <- as_tibble(predM) %>%
     mutate(across(all_of(cols_to_zero), ~ 0))
   # If you need to convert back to a matrix
   predM <- as.matrix(predM)
@@ -127,24 +137,26 @@ impute_missing_values <- function(metal.code) {
       stop("Error: 'detect.limit' column is missing from predictor matrix.")
     }
     detect_limit <- x[!ry, "detect.limit"]  # Extract detection limits for missing rows
-    
-    # Default PMM imputation
-    imputed_values <- mice.impute.pmm(y, ry, x, ...)
+    if (any(is.na(detect_limit))) {
+      stop("Missing detection limit for censored rows.")
+    }
+    # Base values using PMM
+    pmm_vals <- do.call(mice.impute.pmm, list(y = y, ry = ry, x = x))
     
     # Generate random values below the detection limit
     imputed_values <- EnvStats::rlnormTrunc(
-      length(imputed_values),
-      min = 0.001,
+      length(pmm_vals),
+      min = pmin(0.001, detect_limit / 2),
       # Lower bound (assumes non-negative conc)
       max = detect_limit,
       # Upper bound (detection limit)
-      meanlog = log(imputed_values),
-      sd = sd(log(y), na.rm = TRUE)
+      meanlog = log(pmm_vals + 0.001),
+      sdlog = sd(log(y[ry]), na.rm = TRUE)
     )  # Use observed SD
     
     return(imputed_values)
   }
-  
+  exists("mice.impute.conc_below_limit")
   # MICE imputation step
   imp2 <- tryCatch({
     message("Attempting MICE imputation (first try)...")
@@ -169,16 +181,24 @@ impute_missing_values <- function(metal.code) {
     # We run the mice code with 0 iterations
     imp <- mice(master_imp, maxit = 0)
     # extractr predictorMatrix and methods of imputation
-    predM <- as_tibble(imp$predictorMatrix)
+    #predM <- as_tibble(imp$predictorMatrix)
+    predM <- matrix(0, ncol = ncol(master_imp), nrow = ncol(master_imp),
+                    dimnames = list(names(master_imp), names(master_imp)))
+    # Impute conc using only a curated subset of predictors
+    missing_vars <- setdiff(important_predictors, names(master_imp))
+    if (length(missing_vars) > 0) {
+      stop(paste("Important predictors missing from master_imp:", paste(missing_vars, collapse = ", ")))
+    }
+    predM["conc", important_predictors] <- 1
     # specify variables not to impute
     cols_to_zero <- percent_missing_imp %>%
       # columns with too much missingness
       filter(percent_missing > 10) %>%
       pull(column) %>%
       # these need to be imputed, so exclude them from cols_to_zero
-      setdiff(c("conc", "detect.limit"))
+      setdiff(c("conc"))
     # Use mutate(across()) to set them to 0
-    predM <- predM %>%
+    predM <- as_tibble(predM) %>%
       mutate(across(all_of(cols_to_zero), ~ 0))
     # If you need to convert back to a matrix
     predM <- as.matrix(predM)
@@ -187,6 +207,7 @@ impute_missing_values <- function(metal.code) {
     meth <- imp$method
     meth[cols_to_zero] <- ""
     meth["conc"] <- "conc_below_limit"  # Assign custom method
+    
     
     message("Retrying MICE imputation (after adjustments)...")
     
@@ -201,13 +222,16 @@ impute_missing_values <- function(metal.code) {
     )
   })
   
-  percent_missing_imp2 <- complete(imp2, "long") %>%
-    group_by(.imp) %>%
-    summarise(across(everything(), ~ mean(is.na(.x)) * 100)) %>%
-    arrange(desc(conc))
+  # check imputated values are not all zero
+  complete(imp2, "long") %>%
+    filter(censored == TRUE) %>%
+    pull(conc) %>%
+    summary()
+
   
   # inspect quality of imputations
-  bind_rows(master_imp, complete(imp2, "long")) %>%
+  bind_rows(master_imp, 
+            complete(imp2, "long")) %>%
     mutate(.imp = ifelse(is.na(.imp), "original", .imp)) %>%
     #visualize density plot, by .imp and censored
     ggplot(aes(x = .imp, y = conc)) +
@@ -235,13 +259,33 @@ impute_missing_values <- function(metal.code) {
     height = 4,
     dpi = 300
   )
+  
+  # check the relationship is unchanged
+  master %>%
+    filter(conc>0 & censored == FALSE) %>% 
+    mutate(.imp = 0) %>%
+    bind_rows(complete(imp2, "long"))%>%
+    ggplot(aes(x = TRI.water.impact, y = log(conc+0.001))) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_point(aes(color = as.factor(censored)), alpha = 0.5) +
+    stat_poly_eq(
+      aes(label = after_stat(paste(eq.label, rr.label, sep = "~~~"))),
+      formula = y ~ x,
+      parse = TRUE,
+      label.x = "right",
+      label.y = "top"
+    )+
+    facet_wrap(~.imp) +
+    labs(x = "TRI", y = "Concentration") +
+    theme_minimal(base_size = 9)
+ 
   # save imputed data
   saveRDS(complete(imp2, "long"),
           paste0("R_Output/", metal.code, "_imputed_data.rds"))
 }
 
 # vectorize across all five metals
-purrr::map(metal.codes, impute_missing_values)
+purrr::map(metal.codes[2], impute_missing_values)
 
 # Create Table 1
 # read in imputated data, compute summary statistcs, such as number of wells, percent not censorsored, concentration 

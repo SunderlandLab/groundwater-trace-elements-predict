@@ -260,4 +260,4 @@ update_xgboost_models <- function(metal.code) {
 }
 
 # iterate over five trace elements and save model packages
-purrr::map(metal.codes[2], update_xgboost_models)
+purrr::map(metal.codes, update_xgboost_models)

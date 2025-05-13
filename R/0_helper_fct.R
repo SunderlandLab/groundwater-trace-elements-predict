@@ -586,4 +586,21 @@ calc_meanabs_shap <- function(shap) {
   return(shap_absmean)
 }
 
+get_important_predictors <- function(metal.code){
+  important_predictors <- case_when(
+    metal.code == 'As' ~ c('ph', 'ppt', 'C_Sr', 'rech', 'C_Hornbl', 'C_As', 
+                           'C_Sb', 'C_Na', 'caco3_kg_sq_m', 'AQPERMNEW', 'detect.limit'),
+    metal.code == 'Cd' ~ c("SEMS", "TRI.water.impact", "C_Cd", "C_Pb", "HLR", "no3_pub", 
+                           "C_Calcite", "C_Ca", "om_kg_sq_m", 'VALUE_21_pct', "detect.limit"),
+    metal.code == 'Li' ~ c('ph', 'rech', 'ppt', 'no3_dom', 'caco3_kg_sq_m', 'C_Kaolinit', 'cec', 
+                           'C_Tot_Plag', 'C_Cd', 'bfi', 'detect.limit'),
+    metal.code == 'Mn' ~ c('no3_dom', 'unsatWC', 'bfi', 'tmean', 'no3_pub', 'soiloc', 
+                           'C_Hornbl', 'AQPERMNEW', 'Hydrate_N', 'C_Na', 'detect.limit'),
+    metal.code == 'Sr' ~ c('ph', 'caco3_kg_sq_m', 'bfi', 'rech', 'tmean', 'C_Cd', 'ppt', 
+                           'C_Ca', 'ec', 'C_Tot_Plag', 'detect.limit'),
+    TRUE ~ NA_character_
+  )
+  return(important_predictors)
+}
+
 print('helper functions loaded.')

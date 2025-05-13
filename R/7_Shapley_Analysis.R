@@ -172,7 +172,7 @@ run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
 }
 
 # 5 national shapley value analyses
-purrr::map(metal.codes[2], ~run_shapley_analysis(.x, region_shapefile = NULL))
+purrr::map(metal.codes, ~run_shapley_analysis(.x, region_shapefile = NULL))
 # 2 regional shapley value analyses
 run_shapley_analysis(metal.code = "Mn", region_shapefile = pennsylvanian_aquifers)
 run_shapley_analysis(metal.code = "Mn", region_shapefile = mississippi_river_valley_aquifers)
@@ -210,7 +210,8 @@ visualize_shapley_analysis <- function(shap_list_name){
 }
 
 # visualize 5 national shapley values
-purrr::map(paste0(metal.codes[2], "_NULL"), visualize_shapley_analysis)
+purrr::map(paste0(metal.codes, "_NULL"), visualize_shapley_analysis)
 # visualize 2 regional shapley values
 visualize_shapley_analysis("Mn_pennsylvanian_aquifers")
 visualize_shapley_analysis("Mn_mississippi_river_valley_aquifers")
+

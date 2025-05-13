@@ -106,8 +106,7 @@ impute_missing_values <- function(metal.code) {
   predM <- matrix(0, ncol = ncol(master_imp), nrow = ncol(master_imp),
                   dimnames = list(names(master_imp), names(master_imp)))
   # Impute conc using only a curated subset of predictors
-  important_predictors <- c("SEMS", "TRI.water.impact", "C_Cd", "C_Pb", "HLR", "no3_pub", 
-                            "C_Calcite", "C_Ca", "om_kg_sq_m", 'VALUE_21_pct', "detect.limit")
+  important_predictors <- get_important_predictors(metal.code)
   missing_vars <- setdiff(important_predictors, names(master_imp))
   if (length(missing_vars) > 0) {
     stop(paste("Important predictors missing from master_imp:", paste(missing_vars, collapse = ", ")))
@@ -261,31 +260,31 @@ impute_missing_values <- function(metal.code) {
   )
   
   # check the relationship is unchanged
-  master %>%
-    filter(conc>0 & censored == FALSE) %>% 
-    mutate(.imp = 0) %>%
-    bind_rows(complete(imp2, "long"))%>%
-    ggplot(aes(x = TRI.water.impact, y = log(conc+0.001))) +
-    geom_smooth(method = "lm", se = FALSE) +
-    geom_point(aes(color = as.factor(censored)), alpha = 0.5) +
-    stat_poly_eq(
-      aes(label = after_stat(paste(eq.label, rr.label, sep = "~~~"))),
-      formula = y ~ x,
-      parse = TRUE,
-      label.x = "right",
-      label.y = "top"
-    )+
-    facet_wrap(~.imp) +
-    labs(x = "TRI", y = "Concentration") +
-    theme_minimal(base_size = 9)
- 
+  # master %>%
+  #   filter(conc>0 & censored == FALSE) %>% 
+  #   mutate(.imp = 0) %>%
+  #   bind_rows(complete(imp2, "long"))%>%
+  #   ggplot(aes(x = TRI.water.impact, y = log(conc+0.001))) +
+  #   geom_smooth(method = "lm", se = FALSE) +
+  #   geom_point(aes(color = as.factor(censored)), alpha = 0.5) +
+  #   stat_poly_eq(
+  #     aes(label = after_stat(paste(eq.label, rr.label, sep = "~~~"))),
+  #     formula = y ~ x,
+  #     parse = TRUE,
+  #     label.x = "right",
+  #     label.y = "top"
+  #   )+
+  #   facet_wrap(~.imp) +
+  #   labs(x = "TRI", y = "Concentration") +
+  #   theme_minimal(base_size = 9)
+  # 
   # save imputed data
   saveRDS(complete(imp2, "long"),
           paste0("R_Output/", metal.code, "_imputed_data.rds"))
 }
 
 # vectorize across all five metals
-purrr::map(metal.codes[2], impute_missing_values)
+purrr::map(metal.codes, impute_missing_values)
 
 # Create Table 1
 # read in imputated data, compute summary statistcs, such as number of wells, percent not censorsored, concentration 

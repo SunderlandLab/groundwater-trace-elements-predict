@@ -25,9 +25,9 @@ aquifershp <- read_sf(dsn="CoVar/aquifrp025_nt00003", layer="aquifrp025") %>% st
 # CRS info comes from meta data https://catalog.data.gov/dataset/aquifers1
 # https://catalog.data.gov/harvest/object/a92b0a2a-2a5e-4709-879d-e78666d4c471
 pennsylvanian_aquifers <- aquifershp %>% filter(AQ_NAME == "Pennsylvanian aquifers") %>%
-  select(geometry) 
+  dplyr::select(geometry) 
 mississippi_river_valley_aquifers <- aquifershp %>% filter(str_detect(AQ_NAME, "Mississippi River Valley"))%>%
-  select(geometry) 
+  dplyr::select(geometry) 
 
 
 #### rename features 
@@ -78,7 +78,7 @@ relabels <- c('ph_2550' = 'pH',
 
 run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
   print(paste("Begin shapley analysis for", metal.code))
-  filename <- paste0('R_Output/', metal.code,"_ModelPackage.RData")
+  filename <- paste0('R_Output/', metal.code,"_ModelPackage_2step.RData")
   load(filename)
   
   #### 1. Prepare data --------------------------------------------------------------------------------------------------------
@@ -168,17 +168,17 @@ run_shapley_analysis <- function(metal.code, region_shapefile = NULL){
         )
     })
   }
-  saveRDS(shap_list, paste0('R_Output/', metal.code, "_", deparse(substitute(region_shapefile)), '_shap_list.rds'))
+  saveRDS(shap_list, paste0('R_Output/', metal.code, "_", deparse(substitute(region_shapefile)), '_shap_list_2step.rds'))
 }
 
 # 5 national shapley value analyses
-purrr::map(metal.codes, ~run_shapley_analysis(.x, region_shapefile = NULL))
+purrr::map(metal.codes[2], ~run_shapley_analysis(.x, region_shapefile = NULL))
 # 2 regional shapley value analyses
-run_shapley_analysis(metal.code = "Mn", region_shapefile = pennsylvanian_aquifers)
-run_shapley_analysis(metal.code = "Mn", region_shapefile = mississippi_river_valley_aquifers)
+# run_shapley_analysis(metal.code = "Mn", region_shapefile = pennsylvanian_aquifers)
+# run_shapley_analysis(metal.code = "Mn", region_shapefile = mississippi_river_valley_aquifers)
 
 visualize_shapley_analysis <- function(shap_list_name){
-  shap_list <- readRDS(paste0('R_Output/', shap_list_name, '_shap_list.rds'))
+  shap_list <- readRDS(paste0('R_Output/', shap_list_name, '_shap_list_2step.rds'))
   # 1. Extract SHAP matrices
   shap_matrices <- lapply(shap_list, function(sv) sv$S)
   # 2. Pool SHAP values by averaging across imputations
@@ -206,12 +206,12 @@ visualize_shapley_analysis <- function(shap_list_name){
     scale_y_discrete(limits=rev(calc_meanabs_shap(shap_pooled)), labels=relabels) +  
     theme_classic() + 
     theme(axis.text.x = element_text(size=12), axis.text.y=element_text(size=12))  
-  ggsave(varImp.plot, filename = paste0('R_Output/', shap_list_name, '_SHAP_varImp_plot.png'), width = 6, height = 5)
+  ggsave(varImp.plot, filename = paste0('R_Output/', shap_list_name, '_SHAP_varImp_plot_2step.png'), width = 6, height = 5)
 }
 
 # visualize 5 national shapley values
-purrr::map(paste0(metal.codes, "_NULL"), visualize_shapley_analysis)
+purrr::map(paste0(metal.codes[2], "_NULL"), visualize_shapley_analysis)
 # visualize 2 regional shapley values
-visualize_shapley_analysis("Mn_pennsylvanian_aquifers")
-visualize_shapley_analysis("Mn_mississippi_river_valley_aquifers")
+# visualize_shapley_analysis("Mn_pennsylvanian_aquifers")
+# visualize_shapley_analysis("Mn_mississippi_river_valley_aquifers")
 

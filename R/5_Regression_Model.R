@@ -21,7 +21,7 @@ tune_xgboost_models <- function(metal.code) {
   print(paste("Start hyperparameter tuning for", metal.code))
   ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
   df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
-    mutate(logconc = log10(conc+0.001),
+    mutate(logconc = log10(conc),
          is.imputed = as.integer(censored)) 
   
   set.seed(123)
@@ -169,16 +169,117 @@ get_best_model <- function(metal.code) {
 df_hp <- purrr::map(metal.codes, get_best_model) %>%
   bind_rows()
 
-#### 5. update model workflow -------------------------------------------------------------------------------------
+# df_hp <- data.frame(metal=c('As','Mn','Sr','Li','Cd'),
+#                     trees=c(500, 500, 500, 100, 100),
+#                     tree_depth=c(12, 12, 9, 12, 6),
+#                     learn_rate=c(0.03, 0.01, 0.03, 0.05, 0.05),
+#                     mtry=c(0.6, 0.6, 0.6, 0.6, 0.6),
+#                     sample_size=c(0.8, 0.8, 0.6, 1.0, 0.6),
+#                     loss_reduction=c(1.0, 1.0, 0, 0.5, 5))
+
+#### 5. fit detection model only for Cd
+
+fit_detection_model <- function(metal.code) {
+  print(paste("Fitting detection model for", metal.code))
+  
+  df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
+    mutate(detect = as.factor(!censored))  # TRUE if detected
+  
+  set.seed(123)
+  df_splits <- df %>%
+    group_split(.imp) %>%
+    future_map(~ rsample::initial_split(.x, prop = 4 / 5, strata = detect))
+  
+  df_train <- future_map(df_splits, rsample::training)
+  df_test <- future_map(df_splits, rsample::testing)
+  
+  preprocess_recipe <- function(data) {
+    recipes::recipe(detect ~ ., data = data) %>%
+      recipes::step_rm(
+        date, conc, DL.missing, detect.limit, censored,
+        data.source, lon, lat, location.id, well.depth, .imp, .id
+      ) %>%
+      recipes::step_zv(all_predictors()) %>%
+      recipes::step_normalize(all_numeric_predictors()) %>%
+      recipes::step_dummy(all_nominal_predictors())
+  }
+  
+  train_recipes <- future_map(df_train, preprocess_recipe)
+  
+  clf_model <- boost_tree(mode = 'classification', stop_iter = 50) %>%
+    set_args(
+      trees = 200,
+      tree_depth = 6,
+      learn_rate = 0.03,
+      sample_size = 0.8,
+      loss_reduction = 1
+    ) %>%
+    set_engine("xgboost")
+  
+  model_workflows <- map(train_recipes, ~ workflows::workflow() %>%
+                           workflows::add_recipe(.x) %>%
+                           workflows::add_model(clf_model))
+  
+  final_model <- map2(model_workflows, df_train, fit)
+  
+  filename <- paste0("R_Output/", metal.code, "_DetectionModel.RData")
+  detection_model <- final_model
+  detection_df_train <- df_train
+  detection_df_test <- df_test
+  detection_train_recipes <- train_recipes  
+  detection_model_workflows <- model_workflows
+  
+  save(
+    detection_model, 
+    detection_df_train, 
+    detection_df_test, 
+    detection_train_recipes, 
+    detection_model_workflows, 
+    file = filename
+  )
+  
+  print(paste("Detection model for", metal.code, "saved"))
+}
+
+#find the best probability threshold for classification model
+# Predict probabilities on test set
+# clf_probs <- predict(final_model[[1]], df_test[[1]], type = "prob") %>%
+#   bind_cols(df_test[[1]]) %>%
+#   mutate(detect = factor(detect, levels = c("FALSE", "TRUE")))
+# 
+# # Test multiple thresholds (from 0.1 to 0.9 by 0.01)
+# thresholds <- seq(0.1, 0.9, by = 0.01)
+# 
+# results <- map_dfr(thresholds, function(thresh) {
+#   clf_probs %>%
+#     mutate(pred_class = factor(if_else(.pred_TRUE >= thresh, "TRUE", "FALSE"),
+#                                levels = c("FALSE", "TRUE"))) %>%
+#     summarise(
+#       threshold = thresh,
+#       accuracy = accuracy_vec(truth = detect, estimate = pred_class),
+#       kappa = kap_vec(truth = detect, estimate = pred_class)
+#     )
+# })
+# 
+# # View top thresholds
+# results %>%
+#   arrange(desc(kappa)) 
+# the best threshold is 0.29
+
+#### 6. update model workflow -------------------------------------------------------------------------------------
 update_xgboost_models <- function(metal.code) {
   print(paste("Update model workflow for", metal.code))
   ### 1. set up and split data randomlly -----------------------------------------------------------------------------------------------------------
   df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
-    mutate(logconc = log10(conc+0.001),
-           is.imputed = as.integer(censored)) %>%
-    filter(!is.infinite(logconc))
+    mutate(logconc = log10(conc),
+           is.imputed = as.integer(censored))
   
   set.seed(123)
+  # for Cadmium, filter out censored data
+  if (metal.code == metal.codes[2]) {
+    df <- df %>% filter(censored == FALSE)
+  }
+  
   # Split data separately for each imputation
   df_splits <- df %>%
     group_split(.imp) %>%  # Split into separate imputed datasets
@@ -240,7 +341,7 @@ update_xgboost_models <- function(metal.code) {
   
   # Subset only valid columns
   params <- df_hp %>% filter(metal == metal.code) %>%
-    select(intersect(names(df_hp), valid_args)) %>%
+    dplyr::select(intersect(names(df_hp), valid_args)) %>%
     as.list()
   # Update model workflow with best selected hyperparameters
   best_model_workflow <-  purrr::map(
@@ -249,15 +350,21 @@ update_xgboost_models <- function(metal.code) {
   )
 
 
-  ### 6. train final models -------------------------------------------------------------------------------------------------------------
+  ### 7. train final models -------------------------------------------------------------------------------------------------------------
   set.seed(123)
   final_model <- map2(best_model_workflow, df_train, fit) # for collecting test model metrics
   final_full_model <- map2(best_model_workflow, df %>%group_split(.imp), fit) # for feature analyses and prediction
 
-  filename <- paste0("R_Output/", metal.code,"_ModelPackage.RData")
+  filename <- paste0("R_Output/", metal.code,"_ModelPackage_2step.RData")
   save(final_model, final_full_model, df_test, df_train, train_recipes, model_workflows, file = filename) 
   print(paste("Model package for", metal.code, "saved"))
 }
 
-# iterate over five trace elements and save model packages
-purrr::map(metal.codes, update_xgboost_models)
+# Step 1: Fit detection model for censored metal only
+fit_detection_model(metal.codes[2])
+
+# Step 2: Run regression for that metal (auto-uses detection model)
+update_xgboost_models(metal.codes[2])
+
+# Run regression as usual for other metals
+purrr::map(metal.codes[-2], update_xgboost_models)

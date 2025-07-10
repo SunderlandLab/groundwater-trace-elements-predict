@@ -35,7 +35,8 @@ packages <- c(
   "mice",
   "purrr",
   "sp",
-  "xgboost"
+  "xgboost",
+  "yardstick"
 )
 
 lapply(packages, library, character.only = TRUE)

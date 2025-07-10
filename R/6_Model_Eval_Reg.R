@@ -24,9 +24,51 @@ names(MCLs) <- metal.codes
 evaluate_and_predict <- function(metal.code){
   print(paste("Begin evaluation and prediction for", metal.code))
   MCL <- MCLs[metal.code]
-  filename <- paste0('R_Output/', metal.code,"_ModelPackage.RData")
+  filename <- paste0('R_Output/', metal.code,"_ModelPackage_2step.RData")
   load(filename)
   
+  if (metal.code == metal.codes[2]) {
+    # Load detection model
+    load(paste0("R_Output/", metal.code, "_DetectionModel.RData"))
+    
+    # Predict detect/non-detect on test set (for all imputations)
+    clf_probs <- pmap(
+      list(detection_model, detection_df_test),
+      ~ predict(..1, ..2, type = "prob") %>%
+        bind_cols(..2) %>%
+        mutate(detect = factor(detect, levels = c("FALSE", "TRUE")),
+               pred_detect = as.integer(.pred_TRUE >= 0.29))
+    )
+    
+    test_predictions <- pmap(
+      list(clf_probs, final_model),
+      function(preds, model) {
+        preds <- preds %>% 
+          mutate(pred_detect = as.integer(.pred_TRUE >= 0.29),
+                 is.imputed = as.integer(censored))
+        reg_preds <- predict(model, preds) %>%
+          bind_cols(preds) %>%
+          mutate(logconc = log10(conc + 0.001),
+                 antilog_pred = 10^.pred)
+        combined <- preds %>%
+          select(.imp, .id, pred_detect, detect, conc, detect.limit, is.imputed) %>%
+          mutate(
+            actual_detect = as.integer(detect == "TRUE"),
+            .pred = reg_preds$.pred,
+            logconc = log10(conc + 0.001),
+            antilog_pred = 10^.pred,
+            residual = case_when(
+              pred_detect == 0 & actual_detect == 1 ~ logconc,
+              pred_detect == 1 & actual_detect == 0 ~ .pred,
+              pred_detect == 1 & actual_detect == 1 ~ .pred - logconc,
+              TRUE ~ 0
+            )
+          )
+        combined
+      }
+    )
+  
+  } else {
   #### Step 1. Make model predictions -----------------------------------------------------------------------------------------------
   # Create predictions for test data
   test_predictions <- pmap(
@@ -38,7 +80,7 @@ evaluate_and_predict <- function(metal.code){
         antilog_pred = 10^.pred
       )
   )
-  
+  }
   # Subset uncensored test data
   test_predictions_uncens <- map(test_predictions, ~ filter(.x, is.imputed == 0))
   

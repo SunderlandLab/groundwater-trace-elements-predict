@@ -161,3 +161,4 @@ evaluate_and_predict <- function(metal.code){
 
 # iterate over five trace elements and save model packages
 purrr::map(metal.codes, evaluate_and_predict)
+

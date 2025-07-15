@@ -275,10 +275,6 @@ update_xgboost_models <- function(metal.code) {
            is.imputed = as.integer(censored))
   
   set.seed(123)
-  # for Cadmium, filter out censored data
-  if (metal.code == metal.codes[2]) {
-    df <- df %>% filter(censored == FALSE)
-  }
   
   # Split data separately for each imputation
   df_splits <- df %>%
@@ -352,8 +348,16 @@ update_xgboost_models <- function(metal.code) {
 
   ### 7. train final models -------------------------------------------------------------------------------------------------------------
   set.seed(123)
-  final_model <- map2(best_model_workflow, df_train, fit) # for collecting test model metrics
-  final_full_model <- map2(best_model_workflow, df %>%group_split(.imp), fit) # for feature analyses and prediction
+  # for Cadmium, filter out censored data
+  if (metal.code == metal.codes[2]) {
+    df_train_filtered <- map(df_train, ~filter(.x, is.imputed == 0))
+    final_model <- map2(best_model_workflow, df_train_filtered, fit) # for collecting test model metrics
+    final_full_model <- map2(best_model_workflow, df %>% filter(is.imputed == 0) %>%group_split(.imp), fit) # for feature analyses and prediction
+    print("For Cd, limit to detected samples")
+  } else{
+    final_model <- map2(best_model_workflow, df_train, fit) # for collecting test model metrics
+    final_full_model <- map2(best_model_workflow, df %>%group_split(.imp), fit) # for feature analyses and prediction
+  }
 
   filename <- paste0("R_Output/", metal.code,"_ModelPackage_2step.RData")
   save(final_model, final_full_model, df_test, df_train, train_recipes, model_workflows, file = filename) 
@@ -368,3 +372,5 @@ update_xgboost_models(metal.codes[2])
 
 # Run regression as usual for other metals
 purrr::map(metal.codes[-2], update_xgboost_models)
+
+

@@ -1,7 +1,7 @@
 ######################################
-#File name:Bootstrap_Grid.R
+#File name: Bootstrap_Predict.R
 #Author: Jennifer Sun
-#Date: July 2024
+#Date: Nov 2025
 #Purpose: Bootstrap map predictions
 #####################################
 
@@ -11,28 +11,13 @@ lapply(packages, library, character.only=TRUE)
 
 setwd(here::here("data"))
 
-metal = 'Arsenic'
-metal.code = "As"
-version.number = '7a'
-predictor.version = 'v1'
-grid.version = 'tune8_std'
-set.seed(123)
+#### Define Model Version ####
+metal.codes <- c("As", "Cd", "Li", "Mn", "Sr")
+metals <- c("Arsenic", "Cadmium", "Lithium", "Manganese", "Strontium")
+names(metals) <- metal.codes
 
-### 1. Read in and format data -----------------------------------------------------------------------------------------------------------
+### 1. Read in and format grid data -----------------------------------------------------------------------------------------------------------
 
-## A. training data 
-df = readRDS(paste0(metal.code,"_df_PredictorsSelected_",version.number,"_",predictor.version,".rds")) 
-
-# remove any rows with missing landcover data (for Cd)
-if (metal=='Cadmium') {
-  df = subset(df, !is.na(VALUE_0_pct))
-}
-
-df$logconc = log10(df$censored.conc) 
-df$is.imputed = as.integer(df$censored)
-
-
-## B. grid data 
 grid = readRDS(paste0(metal.code, "_MapGrid.rds"))
 
 # match data types with model input
@@ -51,138 +36,419 @@ grid$str_int = as.factor(grid$str_int)
 grid$soilorder_int = as.factor(grid$soilorder_int)
 grid$lith = as.factor(grid$lith)
 
-### 2. set up model-----------------------------------------------------------------------------------------------------
+### 2. Set up regression model -----------------------------------------------------------------------------------------------------
 
-## select hyperparameters (best selected model)
-df_hp <- data.frame(metals=c('As','Mn','Sr','Li','Cd'),
-                    trees=c(500, 500, 500, 100, 100),
-                    tree_depth=c(12, 12, 9, 12, 6),
-                    learn_rate=c(0.03, 0.01, 0.03, 0.05, 0.05),
-                    mtry=c(0.6, 0.6, 0.6, 0.6, 0.6),
-                    sample_size=c(0.8, 0.8, 0.6, 1.0, 0.6),
-                    loss_red=c(1.0, 1.0, 0, 0.5, 5))
-df_hp <- df_hp %>% column_to_rownames(., var='metals')
-
-## regression model
-model.recipe = recipes::recipe(logconc~., data=df) %>%
-  recipes::step_rm(date, ros.conc, censored.conc, conc, DL.missing, censored,is.imputed, data.source, long, lat, location.id) %>%
-  recipes::step_rm(well.depth) %>%
-  recipes::step_rm(detect.limit) %>%
-  recipes::step_zv(all_predictors()) %>% # added 8/4/23
-  recipes::step_normalize(all_numeric_predictors()) %>% # includes numeric and integer types; this is actually standardization (mean=0, std=1) 
-  recipes::step_dummy(all_nominal_predictors()) %>%
-  recipes::prep()
-
-## set model parameters
-tree.model <- boost_tree(mode='regression',stop_iter=50, min_n=10, trees=df_hp[metal.code, 'trees'],tree_depth=df_hp[metal.code, 'tree_depth'],
-                         learn_rate=df_hp[metal.code, 'learn_rate'], mtry=df_hp[metal.code, 'mtry'], sample_size=df_hp[metal.code, 'sample_size'],
-                         loss_reduction=df_hp[metal.code, 'loss_red']) %>% #  
-  set_engine('xgboost', counts=FALSE) %>% # objective='reg:tweedie'
-  set_mode('regression')
-
-## compile model workflow
-model.workflow <- workflows::workflow() %>%
-  workflows::add_recipe(model.recipe) %>%
-  workflows::add_model(tree.model) 
-
-### 3. Run bootstrap model  -------------------------------------------------------------------------------------------------------------
-
-## bootstrap resample
-df.folds = bootstraps(data = df, times = 100, strata = is.imputed)
-
-train_predict_metrics <- function(split, counter) {
-  train_data <- analysis(split) 
-  test_data <- assessment(split)
+bootstrap_regression_model <- function(metal.code) {
+  ## A. format input data -------------------------------------------------------------------------------------------------------------
+  df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
+    mutate(logconc = log10(censored.conc),
+           is.imputed = as.integer(censored)) 
   
-  # Train model
-  xgb_fit = fit(model.workflow, data=subset(train_data, is.imputed==0))
+  # remove any rows with missing landcover data (for Cd)
+  if (metal.code=='Cd') {
+    df = subset(df, !is.na(VALUE_0_pct))
+  }
   
-  # Predict on the map grid
-  predictions <- predict(xgb_fit, new_data = grid) %>%
-    bind_cols(grid) %>%     
-    rename(prediction = .pred) %>% 
-    select(c(longitude, latitude, prediction))
+  ## B. create bootstraps ---------------------------------------------------------------------------------------------------------------
+  bootstraps <- df %>% group_split(.imp, .keep = TRUE) %>% # split by imputation group, map over each of these
+    imap_dfr(~ {
+      imp_val <- unique(.x$.imp) # extract imputation version to save alongside the bootstrap split
+      rsample::bootstraps(.x, times = 20, strata = is.imputed) %>% # run bootstraps x20 for each .imp value
+        mutate(.imp = imp_val)
+    })
   
-  # Predict on the test data for metrics
-  test_predictions <- predict(xgb_fit, new_data = test_data) %>%
-    bind_cols(test_data) %>%
-    rename(prediction = .pred)
+  ## C. select model parameters ------------------------------------------------------------------------------------------------------------
+  # set hyperparameters (extract from best selected model)
+  if (metal.code=='Cd') {
+    filename = paste0(metal.code, "_ModelPackage_2step.RData") 
+  } else {
+    filename = paste0(metal.code, "_ModelPackage.RData") 
+  }
+  load(filename)
   
-  # Calculate performance metrics
-  metrics <- metrics(test_predictions, truth = logconc, estimate = prediction) # what is target? 
+  xgb.engine <- extract_fit_engine(final_full_model[[1]])
+  xgb.params = xgb.engine$params
+  df_hp = list('min_n'= xgb.params$min_child_weight,
+               'mtry'= xgb.params$colsample_bytree,
+               'trees'= xgb.engine$niter,
+               'tree_depth'=xgb.params$max_depth,
+               'learn_rate'=xgb.params$eta,
+               'loss_reduction'=xgb.params$gamma,
+               'sample_size'=xgb.params$subsample)
   
-  # Print progress
-  print(counter)
+  # model recipe 
+  preprocess_recipe <- function(data) {
+    recipes::recipe(logconc ~ ., data = data) %>%
+      recipes::step_rm(
+        date,
+        conc,
+        DL.missing,
+        detect.limit,
+        censored,
+        is.imputed,
+        data.source,
+        lon,
+        lat,
+        location.id,
+        well.depth,
+        .imp,
+        .id
+      ) %>%
+      recipes::step_zv(all_predictors()) %>%
+      recipes::step_normalize(all_numeric_predictors()) %>%
+      recipes::step_dummy(all_nominal_predictors())
+  }
   
-  # Return predictions & metrics 
-  return(list(predictions = predictions, metrics = metrics))
+  tree_model <- boost_tree(mode='regression',stop_iter=50) %>%
+    set_args(min_n=df_hp[['min_n']], 
+             trees=df_hp[['trees']],
+             tree_depth=df_hp[['tree_depth']],
+             learn_rate=df_hp[['learn_rate']], 
+             mtry=df_hp[['mtry']], 
+             sample_size=df_hp[['sample_size']],
+             loss_reduction=df_hp[['loss_reduction']]) %>%   
+    set_engine('xgboost', seed=123, counts=FALSE) %>% 
+    set_mode('regression')
+
+  ## D. Run bootstrap regression model -------------------------------------------------------------------------------------------------------------
+  
+  xgboost_model_predict <- function(split, impID, bootstrapID) {
+    ### a. split data from bootstraps -----------------------------------------------------------------------------------------------------------
+    
+    # Extract train and test sets for each imputation
+    df_train <- training(split)
+    df_test <- testing(split)
+    
+    ### b. set up model workflow -----------------------------------------------------------------------------------------------------
+    
+    # Apply preprocessing to each imputed dataset
+    train_recipe <- preprocess_recipe(df_train)
+    
+    # Compile workflow for each imputed dataset
+    model_workflow <- workflows::workflow() %>%
+      workflows::add_recipe(train_recipe) %>% 
+      workflows::add_model(tree_model)
+    
+    ### c. train  models -------------------------------------------------------------------------------------------------------------
+    set.seed(123)
+    # for Cadmium, filter out censored data
+    if (metal.code == 'Cd') {
+      
+      # train model
+      xgb_fit = fit(model_workflow, data=subset(df_train, is.imputed==0)) # train the model on filtered data 
+      
+      # print("For Cd, limit to detected samples")
+    } else{
+      xgb_fit = fit(model_workflow, data=train_data) # train the model on ALL train data
+      
+    }
+    
+    ### d. predict -----------------------------------------------------------------------------------------------------------------------
+    # predict on map grid  
+    predictions <- predict(xgb_fit, new_data = grid) %>%
+      bind_cols(grid) %>%     
+      rename(prediction = .pred) %>% 
+      select(c(longitude, latitude, prediction))
+    
+    # predict on the test data for metrics
+    test_predictions <- predict(xgb_fit, new_data = df_test) %>% # can subset by truly detected or not later 
+      bind_cols(df_test) %>%
+      rename(prediction = .pred) %>%
+      select(c(location.id, prediction))
+    
+    # predict on the train data for metrics
+    train_predictions <- predict(xgb_fit, new_data = df_train) %>% # in case you want this for EDM adjustment 
+      bind_cols(df_train) %>%
+      rename(prediction = .pred) %>%
+      select(c(location.id, prediction))
+    
+    # create unique bootstrap ID 
+    bootID = paste0(impID, '_', bootstrapID)
+    
+    # Print progress
+    message(bootID)
+    
+    # Return predictions & metrics 
+    return(list(impID = impID, 
+                bootID = bootID, 
+                grid_predictions = predictions, 
+                test_predictions = test_predictions, 
+                train_predictions = train_predictions))
+
+  }
+  
+  # run model
+  results <- pmap(list(split=bootstraps$splits, impID=bootstraps$.imp, bootstrapID = bootstraps$id), 
+                  xgboost_model_predict)
+  
+  # save results 
+  save(results, file = paste0(metal.code,"_BootModels.RData"))
+  print(paste("Bootstraps for", metal.code, "saved"))
 }
 
-# Run the models and gather predictions and metrics
-results <- map2(df.folds$splits, seq_along(df.folds$splits), train_predict_metrics)
-
-
-## 4. Compile predictions ----------------------------------------------------------------------------------------------------------------
-rename_predictions <- function(df, name) {
-  df %>% rename(!!name := prediction)
-}
-
-df_list = map(results, 1) # extract the list of predictions from results
-df_list <- map(df_list, as.data.frame) # extract the dataframes from the tibbles
-
-# Rename the prediction column in each dataframe
-df_list2 <- imap(df_list, ~ rename_predictions(.x, paste0("model", .y)))
-
-# Merge all dataframes using reduce and left_join
-merged_df <- reduce(df_list2, left_join, by = c("longitude", "latitude"))
-
-
-### 5. EDM transformations ----------------------------------------------------------------------------------------------------------------
-EDM_transform <- function(test.pred.adj, train.pred.adj) {  
-  # order train values
-  train.pred.adj$logconc_ordered = sort(train.pred.adj$logconc) # order concentrations
-  train.pred.adj$.pred_ordered = sort(train.pred.adj$.pred) # order predictions
-  tbl_ordered = train.pred.adj[,c('logconc_ordered','.pred_ordered')]
   
-  # transformation: adjust test predictions based on the difference between train predictions & obs skew
-  test_adj = data.frame(approx(tbl_ordered$.pred_ordered, tbl_ordered$logconc_ordered, xout=test.pred.adj)) 
+### 3. Set up detection model for cadmium ------------------------------------------------------------------------------------------------------
 
-  return(test_adj$y)
+bootstrap_detection_model <- function(metal.code) {
+  ## A. format input data -------------------------------------------------------------------------------------------------------------
+  df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
+    mutate(logconc = log10(censored.conc),
+           is.imputed = as.integer(censored)) 
+  
+  # remove any rows with missing landcover data (for Cd)
+  if (metal.code=='Cd') {
+    df = subset(df, !is.na(VALUE_0_pct))
+  }
+  
+  ## B. create bootstraps ---------------------------------------------------------------------------------------------------------------
+  bootstraps <- df %>% group_split(.imp, .keep = TRUE) %>% # split by imputation group, map over each of these
+    imap_dfr(~ {
+      imp_val <- unique(.x$.imp) # extract imputation version to save alongside the bootstrap split
+      rsample::bootstraps(.x, times = 20, strata = is.imputed) %>% # run bootstraps x20 for each .imp value
+        mutate(.imp = imp_val)
+    })
+  
+  ## C. select model parameters ------------------------------------------------------------------------------------------------------------
+  preprocess_detect_recipe <- function(data) {
+    recipes::recipe(detect ~ ., data = data) %>%
+      recipes::step_rm(
+        date, conc, DL.missing, detect.limit, censored, logconc, 
+        data.source, lon, lat, location.id, well.depth, .imp, .id, is.imputed,
+      ) %>%
+      recipes::step_zv(all_predictors()) %>%
+      recipes::step_normalize(all_numeric_predictors()) %>%
+      recipes::step_dummy(all_nominal_predictors())
+  }
+  
+  clf_model <- boost_tree(mode = 'classification', stop_iter = 50) %>%
+    set_args(
+      trees = 200,
+      tree_depth = 6,
+      learn_rate = 0.03,
+      sample_size = 0.8,
+      loss_reduction = 1
+    ) %>%
+    set_engine("xgboost")
+  
+  ## D. Run bootstrap detection model -----------------------------------------------------------------------------------------------------------------
+  xgboost_detection_model <- function(split, impID, bootstrapID) {
+    
+    ## a. split data from bootstraps -----------------------------------------------------------------------------------------------------------
+    
+    # Extract train and test sets for each imputation
+    df_train <- training(split)
+    df_test <- testing(split)
+    
+    ## b. set up model-----------------------------------------------------------------------------------------------------
+    
+    # Apply preprocessing to each imputed dataset
+    train_recipe <- preprocess_detect_recipe(df_train)
+    
+    model_workflow <- workflows::workflow() %>%
+      workflows::add_recipe(train_recipe) %>%
+      workflows::add_model(clf_model)
+    
+    ## c. fit detection model----------------------------------------------------------------------------------------------------------
+    xgb_detect_fit = fit(model_workflow, data=df_train)
+    
+    ## d. predict model ------------------------------------------------------------------------------------------------------------------------
+    
+    # predict on map grid  
+    predictions <- predict(xgb_detect_fit, new_data = grid, type='prob') %>%
+      bind_cols(grid) %>%     
+      rename(pred_true = .pred_TRUE) %>% 
+      select(c(longitude, latitude, pred_true))
+    
+    # predict on the test data for metrics
+    test_predictions <- predict(xgb_detect_fit, new_data = df_test, type='prob') %>% # can subset by truly detected or not later 
+      bind_cols(df_test) %>%
+      rename(pred_true = .pred_TRUE) %>%
+      select(c(location.id, pred_true))
+    
+    # predict on the train data for metrics
+    train_predictions <- predict(xgb_detect_fit, new_data = df_train, type='prob') %>% # in case you want this for EDM adjustment 
+      bind_cols(df_train) %>%
+      rename(pred_true = .pred_TRUE) %>%
+      select(c(location.id, pred_true))
+    
+    # create unique bootstrap ID 
+    bootID = paste0(impID, '_', bootstrapID)
+    
+    # Print progress
+    message(bootID)
+    
+    # Return predictions & metrics 
+    return(list(impID = impID, 
+                bootID = bootID, 
+                grid_predictions = predictions, 
+                test_predictions = test_predictions, 
+                train_predictions = train_predictions)) 
+  }
+  
+  # run model
+  results <- pmap(list(split=bootstraps$splits, impID=bootstraps$.imp, bootstrapID = bootstraps$id), 
+                  xgboost_detection_model)
+  
+  # save results 
+  save(results, file = paste0(metal.code,"_detects_BootModels.RData"))
+  print(paste("Bootstraps for", metal.code, "saved"))
+  
 }
 
 
-# EDM adjustment
-adj_df = merged_df[,-c(1,2)] %>%
-  map_dfc(~ EDM_transform(.x, train.predictions.uncens))
+## 4. Compile and summarize regression predictions ----------------------------------------------------------------------------------------------------------------
 
-grid.predictions = bind_cols(merged_df[,c(1,2)], adj_df)
+summarize_regression_bootstraps <- function(metal.code) {
+  ## a. Read in model results ------------------------------------------------------------------------------------------------------------------------------------
+  load(paste0(metal.code,"_BootModels.RData"))
+  
+  # original model with train predictions for EDM adjustment
+  if (metal.code=='Cd') {
+    load(paste0(metal.code, "_ModelPackage_2step.RData")) 
+  } else {
+    load(paste0(metal.code, "_ModelPackage.RData"))
+  }
+  
+  ## b. Extract and compile bootstrap predictions ------------------------------------------------------------------------------------------------------------------
+  grid_list = map(results, 3) # results
+  bootID_list = map_chr(results, 2) # column names
+  impID_list = map_int(results, 1) # identify adjusted train predictions to use for EDM adjustment
+  
+  # Rename the prediction column in each dataframe
+  rename_predictions <- function(df, name) {  
+    df %>% rename(!!name := prediction)
+  }
+  grid_list2 <- map2(grid_list, bootID_list, rename_predictions)
+  
+  grid_predicts <- reduce(grid_list2, left_join, by = c("longitude", "latitude"))
+  
+  ## c. EDM adjustment --------------------------------------------------------------------------------------------------------------------------------------------------
+  # calculate train predictions for 5 imputed train datasets
+  train_predict <- function(model, df.train) {
+    # prepare training predictions
+    df.train.filtered = subset(df.train, is.imputed==0) # test predictions similarly done only on un-imputed values in script #5
+    train.pred.filtered = predict(model, df.train.filtered) %>% bind_cols(df.train.filtered)
+    
+    return(train.pred.filtered) # also named train.pred.adj
+  }
+  
+  # EDM transformation
+  EDM_transform <- function(test.pred, train.pred.filtered) { # grid predictions (as single vector), train.pred.filtered; 
+    # NOTE: changed inputs from train.pred.adj and test.pred.adj to current versions to reflect the contents of the INPUT rather than the intended contents of the OUTPUT 
+    
+    # order train values
+    train.pred.filtered$logconc_ordered = sort(train.pred.filtered$logconc) # order concentrations
+    train.pred.filtered$.pred_ordered = sort(train.pred.filtered$.pred) # order train predictions
+    tbl_ordered = train.pred.filtered[,c('logconc_ordered','.pred_ordered')]
+    
+    # transformation: adjust test predictions based on the difference between train predictions & obs skew
+    test_adj = data.frame(approx(tbl_ordered$.pred_ordered, tbl_ordered$logconc_ordered, xout=test.pred)) 
+    
+    return(test_adj$y)
+  }
+  
+  # create train dataset predictions
+  train.pred.filtered = map2(final_model, df_train, train_predict) # predict on train datasets using models trained on only the same train datasets
+  
+  # apply EDM transformation to grid (or test) datasets predicted using model trained on corresponding train dataset 
+  grid.pred.adj = map2(bootID_list, impID_list, ~EDM_transform(grid_predicts[[.x]], train.pred.filtered[[.y]])) %>% # EDM transformation (five separate grid transformations)
+    set_names(bootID_list) %>%
+    as_tibble() 
+  
+  # combine adjusted results with lat/longs
+  grid.pred.adj <- bind_cols(select(grid_predicts, c('longitude','latitude')), grid.pred.adj)
+  
+  ## d. Add detection filter results for Cd model 
+  if (metal.code == 'Cd') {
+    load('Cd_DetectionModel.RData')
+    
+    grid = grid %>% mutate(HLR = as.numeric(HLR))
+    grid.detectprobs = detection_model %>% 
+      map( ~ predict(.x, new_data=grid, type='prob') %>% pull(.pred_TRUE)) %>%  # model prediction
+      as_tibble(.name_repair = ~ paste0("p_model", seq_along(.))) %>%  # save results in a tibble
+      mutate(p_mean = rowMeans(across(everything()))) %>% # take the average of the predictions 
+      mutate(detect_class = as.integer(p_mean >=0.29)) # create filter for detections
+    
+    # add detection filter to adjusted prediction results
+    grid.results = bind_cols(grid.pred.adj, grid.detectprobs)
+  } else {
+    grid.results = grid.pred.adj
+  }
+  
+  ## e. Calculate summary values and compile into a single dataframe 
+  
+  grid.summary = grid.results %>%  # create tibble with named columns
+    rowwise() %>%
+    mutate(
+      pred_log_mean = mean(c_across(contains('Bootstrap')), na.rm = TRUE), 
+      pred_log_p025 = as.numeric(quantile(c_across(contains('Bootstrap')), 0.025, na.rm = TRUE)),
+      pred_log_p50 = as.numeric(median( c_across(contains('Bootstrap')), na.rm = TRUE)),
+      pred_log_p975 = as.numeric(quantile(c_across(contains('Bootstrap')), 0.975, na.rm = TRUE)),
+      pred_log_sd = apply(as.matrix(across(contains('Bootstrap'))), 1, sd, na.rm = TRUE),
+      pred_log_lower = pred_log_mean - 1.96 * pred_log_sd,
+      pred_log_upper = pred_log_mean + 1.96 * pred_log_sd,
+    ) %>% 
+    mutate(
+      pred_mean = 10^pred_log_mean,
+      pred_p025 = 10^pred_log_p025,
+      pred_p50  = 10^pred_log_p50,
+      pred_p975 = 10^pred_log_p975,
+      pred_lower = 10^pred_log_lower,
+      pred_upper = 10^pred_log_upper
+    ) %>%
+    ungroup() %>% 
+    mutate(across(where(is.numeric), ~ replace_na(., -1))) %>% # repalce all NA values with -1 so they can be mapped 
+    select(-contains("Bootstrap"), -starts_with("p_model")) # remove individual model results
+  
+  ## D. Save results and summary grids
+  write.csv(grid.results, paste0('Cd_BootGridPredicts.csv'))
+  write.csv(grid.summary, paste0('Cd_BootGridPredictSummary.csv'))
+ 
+}
 
-# Save all prediction values
-write.csv(grid.predictions, paste0(folder.name, bootstraps.name, metal.code,"_BootGridPredictsAll_",version.number,"_",predictor.version,'.csv'))
+### 5. Compile and summarize detection predictions -----------------------------------------------------------------------------------------------------------
 
-### 6. Calculate summary values ----------------------------------------------------------------------------------------------------------------
-# Calculate the average
-pred_means <- rowMeans(adj_df, na.rm = TRUE) # in a limited number of cases, values may be outside model bounds and results in NA predictions
-pred_sd <- apply(adj_df, 1, sd, na.rm=TRUE)
-lower_bound <- pred_means - 1.96 * pred_sd
-upper_bound <- pred_means + 1.96 * pred_sd
-pred_median <- apply(adj_df, 1, median, na.rm=TRUE)
-na_count <- rowSums(is.na(adj_df))
+summarize_detection_bootstraps <- function(metal.code) {
+  results = load(paste0(metal.code, "_detects_BootModels.RData"))
+  
+  grid_list = map(results, 3) # results
+  bootID_list = map_chr(results, 2) # column names
+  impID_list = map_int(results, 1) # identify adjusted train predictions to use for EDM adjustment
+  
+  # Rename the prediction column in each dataframe
+  rename_predictions <- function(df, name) {  
+    df %>% rename(!!name := pred_true)
+  }
+  grid_list2 <- map2(grid_list, bootID_list, rename_predictions)
+  
+  grid_predicts <- reduce(grid_list2, left_join, by = c("longitude", "latitude"))
+  
+  grid.detects.summary = grid_predicts %>%  # create tibble with named columns
+    rowwise() %>%
+    mutate(
+      pred_mean = mean(c_across(contains('Bootstrap')), na.rm = TRUE), 
+      pred_p025 = as.numeric(quantile(c_across(contains('Bootstrap')), 0.025, na.rm = TRUE)),
+      pred_p50 = as.numeric(median( c_across(contains('Bootstrap')), na.rm = TRUE)),
+      pred_p975 = as.numeric(quantile(c_across(contains('Bootstrap')), 0.975, na.rm = TRUE)),
+      pred_sd = apply(as.matrix(across(contains('Bootstrap'))), 1, sd, na.rm = TRUE),
+      pred_lower = pred_mean - 1.96 * pred_sd,
+      pred_upper = pred_mean + 1.96 * pred_sd,
+    ) %>% 
+    ungroup() %>% 
+    mutate(across(where(is.numeric), ~ replace_na(., -1))) # repalce all NA values with -1 so they can be mapped 
+  
+  write.csv(grid.detects.summary, paste0(metal.code, '_BootGridDetects.csv')) 
+  
+}
 
-summary_df = data.frame(
-  mean = 10**pred_means,
-  sd = 10**pred_sd,
-  median = 10**pred_median,
-  lower = 10**lower_bound,
-  upper = 10**upper_bound, 
-  NAs = na_count
-)
 
-# Replace all NA values with -1 so they can be mapped, but they are still recorded separately from predicted 0s
-summary_df[is.na(summary_df)] = -1
 
-# Compile a dataframe
-grid.summary = bind_cols(merged_df[,c(1,2)], summary_df)
+### 6. Formally run and save models --------------------------------------------------------------------------------------------------------------
 
-# Save bootstrap summary values
-write.csv(grid.summary, paste0(folder.name, bootstraps.name, metal.code,"_BootGridPredictSummary",version.number,"_",predictor.version,'.csv'))
+# run bootstrap regression models 
+map(metal.codes, bootstrap_regression_model)
+map(metal.codes, summarize_regression_bootstraps)
+
+# run detection model for Cd 
+map(metal.codes, bootstrap_regression_model)
+map(metal.codes, summarize_detection_bootstraps)

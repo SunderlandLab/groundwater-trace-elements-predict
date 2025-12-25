@@ -185,6 +185,15 @@ fit_detection_model <- function(metal.code) {
   df <- readRDS(paste0("R_Output/", metal.code, "_imputed_data.rds")) %>%
     mutate(detect = as.factor(!censored))  # TRUE if detected
   
+  # overlap between detect vs non-detect
+  df %>% group_by(detect) %>%
+    summarise(min_conc = min(conc),
+              max_conc = max(conc),
+              mean_conc = mean(conc),
+              min_dl = min(detect.limit),
+              max_dl = max(detect.limit),
+              mean_dl = mean(detect.limit),
+              n = n())
   set.seed(123)
   df_splits <- df %>%
     group_split(.imp) %>%

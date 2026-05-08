@@ -428,13 +428,44 @@ extract_SEMS_impact <- function(M_stn, metal.code) {
 
 # Helper functions for model performance evaluation
 ## print result metrics
+# calc_reg_metrics <- function(list_of_dfs, group_label = "test") {
+#   list_of_dfs %>%
+#     purrr::map(~ {
+#       yardstick::metrics(.x, logconc, .pred) %>%
+#         as.data.frame() %>%
+#         dplyr::select(-.estimator) %>%
+#         dplyr::rename(metric = .metric, estimate = .estimate)
+#     }) %>%
+#     bind_rows(.id = "imputation") %>%
+#     dplyr::group_by(metric) %>%
+#     dplyr::summarise(pooled_estimate = mean(estimate), .groups = "drop") %>%
+#     dplyr::mutate(group = group_label)
+# }
 calc_reg_metrics <- function(list_of_dfs, group_label = "test") {
   list_of_dfs %>%
     purrr::map(~ {
-      yardstick::metrics(.x, logconc, .pred) %>%
+      
+      .x <- .x %>%
+        dplyr::mutate(
+          pred_conc = pmax(10^.pred - 0.001, 0),
+          obs_conc = conc
+        )
+      
+      log_metrics <- yardstick::metrics(.x, logconc, .pred) %>%
         as.data.frame() %>%
         dplyr::select(-.estimator) %>%
         dplyr::rename(metric = .metric, estimate = .estimate)
+      
+      orig_metrics <- tibble::tibble(
+        metric = c("rmse_original", "mae_original"),
+        estimate = c(
+          yardstick::rmse_vec(truth = .x$obs_conc, estimate = .x$pred_conc),
+          yardstick::mae_vec(truth = .x$obs_conc, estimate = .x$pred_conc)
+        )
+      )
+      
+      dplyr::bind_rows(log_metrics, orig_metrics)
+      
     }) %>%
     bind_rows(.id = "imputation") %>%
     dplyr::group_by(metric) %>%

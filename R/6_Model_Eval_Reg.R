@@ -132,11 +132,34 @@ evaluate_and_predict <- function(metal.code){
   train_reg <- calc_reg_metrics(train_predictions_uncens, group_label = "train")
   train_class  <- calc_class_metrics(train_predictions, MCL, group_label ='train')
   # D. Compile all results into a table
+  # df_metrics <- rbind(test_reg, test_class, test_regAdj, test_classAdj, train_reg, train_class) %>% 
+  #   spread(group, pooled_estimate) %>% 
+  #   arrange(factor(metric, levels=c('sens','spec','accuracy','rsq','rmse','mae'))) %>%
+  #   dplyr::mutate_if(is.numeric, round,3) %>% 
+  #   dplyr::mutate(metric = recode(metric,'sens'='sensitivity','spec'='specificity','rsq'='R2','rmse'='RMSE','mae'='MAE'))
   df_metrics <- rbind(test_reg, test_class, test_regAdj, test_classAdj, train_reg, train_class) %>% 
     spread(group, pooled_estimate) %>% 
-    arrange(factor(metric, levels=c('sens','spec','accuracy','rsq','rmse','mae'))) %>%
-    dplyr::mutate_if(is.numeric, round,3) %>% 
-    dplyr::mutate(metric = recode(metric,'sens'='sensitivity','spec'='specificity','rsq'='R2','rmse'='RMSE','mae'='MAE'))
+    arrange(factor(
+      metric, 
+      levels = c(
+        'sens', 'spec', 'accuracy',
+        'rsq', 'rmse', 'mae',
+        'rmse_original', 'mae_original'
+      )
+    )) %>%
+    dplyr::mutate_if(is.numeric, round, 3) %>% 
+    dplyr::mutate(
+      metric = recode(
+        metric,
+        'sens' = 'sensitivity',
+        'spec' = 'specificity',
+        'rsq' = 'R2_log10',
+        'rmse' = 'RMSE_log10',
+        'mae' = 'MAE_log10',
+        'rmse_original' = 'RMSE_original',
+        'mae_original' = 'MAE_original'
+      )
+    )
   # write out results 
   write_csv(df_metrics, paste0('R_Output/',metal.code,'_Model_Eval_Metrics.csv'))
   

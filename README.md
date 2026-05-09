@@ -1,8 +1,7 @@
 # GWPred
 
 **Code repository for manuscript**  
-_Advancing exposure science for drinking water contaminants in private wells: A predictive framework for groundwater trace element mixtures across the contiguous United States_
-
+_Predicting trace element concentrations and mixtures in U.S. private drinking water using machine learning methods_
 ---
 
 ## 📁 Project Structure

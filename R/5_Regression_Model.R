@@ -48,7 +48,7 @@ tune_xgboost_models <- function(metal.code) {
         lon,
         lat,
         location.id,
-        well.depth,
+        #well.depth,
         .imp,
         .id
       ) %>%
@@ -206,7 +206,8 @@ fit_detection_model <- function(metal.code) {
     recipes::recipe(detect ~ ., data = data) %>%
       recipes::step_rm(
         date, conc, DL.missing, detect.limit, censored,
-        data.source, lon, lat, location.id, well.depth, .imp, .id
+        data.source, lon, lat, location.id, #well.depth, 
+        .imp, .id
       ) %>%
       recipes::step_zv(all_predictors()) %>%
       recipes::step_normalize(all_numeric_predictors()) %>%
@@ -231,7 +232,7 @@ fit_detection_model <- function(metal.code) {
   
   final_model <- map2(model_workflows, df_train, fit)
   
-  filename <- paste0("R_Output/", metal.code, "_DetectionModel.RData")
+  filename <- paste0("R_Output/", metal.code, "_DetectionModel_senswelldepth.RData")
   detection_model <- final_model
   detection_df_train <- df_train
   detection_df_test <- df_test
@@ -308,7 +309,7 @@ update_xgboost_models <- function(metal.code) {
         lon,
         lat,
         location.id,
-        well.depth,
+        #well.depth,
         .imp,
         .id
       ) %>%
@@ -368,7 +369,7 @@ update_xgboost_models <- function(metal.code) {
     final_full_model <- map2(best_model_workflow, df %>%group_split(.imp), fit) # for feature analyses and prediction
   }
 
-  filename <- paste0("R_Output/", metal.code,"_ModelPackage_2step.RData")
+  filename <- paste0("R_Output/", metal.code,"_ModelPackage_2step_senswelldepth.RData")
   save(final_model, final_full_model, df_test, df_train, train_recipes, model_workflows, file = filename) 
   print(paste("Model package for", metal.code, "saved"))
 }

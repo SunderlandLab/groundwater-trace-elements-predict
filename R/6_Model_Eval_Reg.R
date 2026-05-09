@@ -24,12 +24,12 @@ names(MCLs) <- metal.codes
 evaluate_and_predict <- function(metal.code){
   print(paste("Begin evaluation and prediction for", metal.code))
   MCL <- MCLs[metal.code]
-  filename <- paste0('R_Output/', metal.code,"_ModelPackage_2step.RData")
+  filename <- paste0('R_Output/', metal.code,"_ModelPackage_2step_senswelldepth.RData")
   load(filename)
   
   if (metal.code == metal.codes[2]) {
     # Load detection model
-    load(paste0("R_Output/", metal.code, "_DetectionModel.RData"))
+    load(paste0("R_Output/", metal.code, "_DetectionModel_senswelldepth.RData"))
     
     # Predict detect/non-detect on test set (for all imputations)
     clf_probs <- pmap(
@@ -120,7 +120,7 @@ evaluate_and_predict <- function(metal.code){
     }) %>%
     patchwork::wrap_plots(plot_list_labeled, ncol = 2)
   # save ggplot object
-  ggsave(paste0('R_Output/',metal.code,'_EDM_transformation_plot.png'), width = 8, height = 6)
+  ggsave(paste0('R_Output/',metal.code,'_EDM_transformation_plot_senswelldepth.png'), width = 8, height = 6)
   # A. ORIGINAL test data
   # pool across 5 imputations
   test_reg <- calc_reg_metrics(test_predictions_uncens, group_label = "test")
@@ -161,7 +161,7 @@ evaluate_and_predict <- function(metal.code){
       )
     )
   # write out results 
-  write_csv(df_metrics, paste0('R_Output/',metal.code,'_Model_Eval_Metrics.csv'))
+  write_csv(df_metrics, paste0('R_Output/',metal.code,'_Model_Eval_Metrics_senswelldepth.csv'))
   
   #### Step 3. Calculate residuals/errors and write out results ------------------------------------------------------------------------------------------
   # original results 
@@ -177,7 +177,7 @@ evaluate_and_predict <- function(metal.code){
   train_predictions <- map(train_predictions, ~calculate_class_errors(.x, MCL))
   
   # write out data 
-  writename <- paste0('R_Output/', metal.code,"_Predicts.RData")
+  writename <- paste0('R_Output/', metal.code,"_Predicts_senswelldepth.RData")
   save(test_predictions, test_predictions_adj, train_predictions, file=writename)
   print(paste("evaluation and prediction for", metal.code, "is finished."))
 }

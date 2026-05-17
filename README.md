@@ -1,7 +1,7 @@
 # GWPred
 
 **Code repository for manuscript**  
-_Predicting trace element concentrations and mixtures in U.S. private drinking water using machine learning methods_
+_Predicting trace element concentrations and mixtures in groundwater across the contiguous United States using machine learning methods_
 ---
 
 ## 📁 Project Structure
@@ -21,6 +21,7 @@ GWPred/
     ├── 3_Predictor_Selection.R/   # Select important predictor variables
     ├── 4_MICE.R/                  # Multiple Imputation by Chained Equations for missing data
     ├── 5_Regression_Model.R/      # Develop predictive models
+    ├── 5b_Rebuild_Models.R/       # Resolves version incompatbility between model training and model evaluation runs
     ├── 6_Model_Eval_Reg.R/        # Evaluate model performance
     ├── 7_Shapley_Analysis.R/      # Conduct Shapley value analysis for model interpretability
     ├── 8_geoSOM_Grid.R/           # Generate geoSOM grid for mixture analysis

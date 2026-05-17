@@ -106,19 +106,15 @@ evaluate_and_predict <- function(metal.code){
   test_predictions_adj_uncens <- map2(test_predictions, train_predictions_uncens, EDM_transform)
   test_predictions_adj_plot <- map2(test_predictions_uncens, train_predictions, EDM_transform)
   # diagnostic plots
-  # map2(test_predictions_adj_plot, train_predictions_uncens, plot_trans_ordered) 
+  # map2(test_predictions_adj_plot, train_predictions_uncens, plot_trans_ordered)
+  assign("metal.code", metal.code, envir = globalenv())  # plot_trans_cdf reads metal.code from global env
   map2(test_predictions_adj_plot, train_predictions_uncens, plot_trans_cdf) %>%
     imap( ~ {
-      # Get original title if it exists
-      original_title <- .x$labels$title %||% ""  # use `%||%` to avoid NULL
-      
-      # Create new title by appending
+      original_title <- .x$labels$title %||% ""
       new_title <- paste(original_title, "-", paste("Imputation", .y))
-      
-      # Add updated title
       .x + ggtitle(new_title)
     }) %>%
-    patchwork::wrap_plots(plot_list_labeled, ncol = 2)
+    patchwork::wrap_plots(ncol = 2)
   # save ggplot object
   ggsave(paste0('R_Output/',metal.code,'_EDM_transformation_plot.png'), width = 8, height = 6)
   # A. ORIGINAL test data
@@ -140,7 +136,30 @@ evaluate_and_predict <- function(metal.code){
   # write out results 
   write_csv(df_metrics, paste0('R_Output/',metal.code,'_Model_Eval_Metrics.csv'))
   
-  #### Step 3. Calculate residuals/errors and write out results ------------------------------------------------------------------------------------------
+  #### Step 3. Scatter plot: predicted vs. observed ---------------------------------------------------------------------------------------------
+  make_pred_obs_plot <- function(df_list, title_suffix = "") {
+    pooled <- bind_rows(df_list)
+    r2 <- round(cor(pooled$logconc, pooled$.pred, use = "complete.obs")^2, 3)
+    ggplot(pooled, aes(x = logconc, y = .pred)) +
+      geom_point(alpha = 0.35, size = 1.2) +
+      geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+      annotate("text", x = -Inf, y = Inf, hjust = -0.2, vjust = 1.5,
+               label = paste0("R² = ", r2), size = 3.5) +
+      labs(
+        x = "Observed (log₁₀ μg/L)",
+        y = "Predicted (log₁₀ μg/L)",
+        title = paste0(metals[metal.code], title_suffix)
+      ) +
+      theme_bw() +
+      theme(plot.title = element_text(hjust = 0.5))
+  }
+
+  p_orig <- make_pred_obs_plot(test_predictions_uncens, " — Original")
+  p_adj  <- make_pred_obs_plot(test_predictions_adj_uncens, " — EDM Adjusted")
+  patchwork::wrap_plots(p_orig, p_adj, ncol = 2)
+  ggsave(paste0("R_Output/", metal.code, "_PredObs_scatter.png"), width = 10, height = 5)
+
+  #### Step 5. Calculate residuals/errors and write out results ------------------------------------------------------------------------------------------
   # original results 
   test_predictions <- map(test_predictions, calculate_reg_errors)
   test_predictions <- map(test_predictions, ~calculate_class_errors(.x, MCL))
@@ -161,4 +180,5 @@ evaluate_and_predict <- function(metal.code){
 
 # iterate over five trace elements and save model packages
 purrr::map(metal.codes, evaluate_and_predict)
+
 

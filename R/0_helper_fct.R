@@ -39,6 +39,7 @@ packages <- c(
   "yardstick"
 )
 
+#lapply(packages, install.packages, character.only = TRUE)
 lapply(packages, library, character.only = TRUE)
 #### Helper functions
 
